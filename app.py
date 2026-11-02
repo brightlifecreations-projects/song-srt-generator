@@ -1,4 +1,4 @@
-"""Song SRT Generator — local web server. All processing lives in pipeline.py.
+"""SRT Generator — local web server. All processing lives in pipeline.py.
 
 Serves the built React frontend (frontend/dist) and a small JSON API.
 Jobs run one at a time on a single worker thread, matching the V1 queue rule.
@@ -13,6 +13,7 @@ import os
 import queue
 import re
 import shutil
+import sys
 import threading
 import time
 import urllib.request
@@ -26,9 +27,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import config
-from pipeline import (ACCEPTED_EXTENSIONS, AUTO_LANGUAGE, CONTENT_TYPES, DATA_DIR,
-                      DEFAULT_SCRIPT, SCRIPT_CODES, PipelineError, align_and_write, flow_steps,
-                      is_video, make_reporter, preprocess_lyrics, run_transcription, start_job)
+from pipeline import (ACCEPTED_EXTENSIONS, AUTO_LANGUAGE, DATA_DIR, DEFAULT_SCRIPT,
+                      SCRIPT_CODES, PipelineError, align_and_write, clean_isolate, clean_section,
+                      flow_steps, is_video, make_reporter, preprocess_lyrics, run_transcription,
+                      start_job)
 
 ROOT = Path(__file__).parent
 DIST = ROOT / "frontend" / "dist"
@@ -52,7 +54,7 @@ on_focus_request = None
 # ---------------------------------------------------------------------------
 ATTRIBUTION = "Made by Aman using Claude"
 
-app = FastAPI(title="Song SRT Generator", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="SRT Generator", docs_url=None, redoc_url=None, openapi_url=None)
 
 # In-memory job registry: id -> state dict. Jobs also persist on disk in jobs/.
 JOBS: dict[str, dict] = {}
@@ -87,12 +89,14 @@ def _run_job(job: dict):
     def progress(step, total, message):
         job.update(stage=step, message=message)
 
-    steps = flow_steps(job["mode"], job["content_type"])
+    steps = flow_steps(job["mode"], job["section"], job["isolate"])
     report = make_reporter(steps, progress)
     if job["task"] == "lyrics":
         preprocess_lyrics(job["lyrics_text"], strip_tags=job["strip_tags"])  # fail fast
     if job["task"] in ("lyrics", "transcribe"):
-        job["ctx"] = start_job(job["audio_path"], job["content_type"], report)
+        job["ctx"] = start_job(job["audio_path"], job["section"], report, job["isolate"],
+                               video_preview=job["video_preview"])
+        job["music_detected"] = job["ctx"]["music_detected"]
         job["audio_ready"] = True
         shutil.rmtree(job["upload_dir"], ignore_errors=True)
     ctx = job["ctx"]
@@ -153,6 +157,7 @@ def meta():
     return {
         "attribution": ATTRIBUTION,
         "format_default": config.FORMAT_DEFAULT,
+        "sections": [{"code": code, **preset} for code, preset in config.SECTIONS.items()],
         "languages": [{"code": code, "name": name} for code, name in config.LANGUAGES],
         "language_default": config.LANGUAGE,
         "transcribe_language_default": config.TRANSCRIBE_LANGUAGE,
@@ -180,11 +185,12 @@ def update_check():
     if "result" in _update_cache:
         return _update_cache["result"]
     result = {"available": False}
-    if config.CHECK_FOR_UPDATES and VERSION != "dev":
+    # The Mac app updates itself with Sparkle (V4.0); the banner is for Windows and checkouts.
+    if config.CHECK_FOR_UPDATES and VERSION != "dev" and sys.platform != "darwin":
         try:
             req = urllib.request.Request(
                 f"https://api.github.com/repos/{config.UPDATE_REPO}/releases/latest",
-                headers={"Accept": "application/vnd.github+json", "User-Agent": "song-srt-generator"},
+                headers={"Accept": "application/vnd.github+json", "User-Agent": "srt-generator"},
             )
             with urllib.request.urlopen(req, timeout=4) as r:
                 release = json.load(r)
@@ -228,18 +234,17 @@ def _save_upload(audio: UploadFile):
     return job_id, upload_dir, audio_path
 
 
-def _clean_choices(video_format: str, language: str, content_type: str, default_language: str):
+def _clean_choices(video_format: str, language: str, section: str, default_language: str):
+    section = clean_section(section)
     if video_format not in ("vertical", "horizontal"):
-        video_format = config.FORMAT_DEFAULT
+        video_format = config.SECTIONS[section]["format"]
     if language not in {code for code, _ in config.LANGUAGES}:
         language = default_language
-    if content_type not in CONTENT_TYPES:
-        content_type = "song"
-    return video_format, language, content_type
+    return video_format, language, section
 
 
 def _queue(job_id: str, job: dict):
-    steps = flow_steps(job["mode"], job["content_type"])
+    steps = flow_steps(job["mode"], job["section"], job["isolate"])
     job.update(status="queued", message="Waiting for a free slot…",
                steps=[title for _, title in steps])
     job.setdefault("stage", 0)
@@ -253,13 +258,15 @@ async def create_job(
     audio: UploadFile = File(...),
     lyrics: str = Form(...),
     strip_tags: bool = Form(True),
-    video_format: str = Form(config.FORMAT_DEFAULT),
+    video_format: str = Form(""),
     language: str = Form(config.LANGUAGE),
-    content_type: str = Form("song"),
+    section: str = Form("song"),
+    isolate: str = Form(""),
+    video_preview: bool = Form(False),
 ):
     """Lyrics/script mode: the whole flow in one job."""
-    video_format, language, content_type = _clean_choices(
-        video_format, language, content_type, config.LANGUAGE)
+    video_format, language, section = _clean_choices(
+        video_format, language, section, config.LANGUAGE)
     _evict_finished_jobs()
     saved = _save_upload(audio)
     if isinstance(saved, JSONResponse):
@@ -269,7 +276,8 @@ async def create_job(
         "task": "lyrics", "mode": "lyrics", "created": time.time(),
         "audio_path": str(audio_path), "upload_dir": str(upload_dir), "lyrics_text": lyrics,
         "strip_tags": strip_tags, "video_format": video_format, "language": language,
-        "content_type": content_type,
+        "section": section, "isolate": clean_isolate(isolate, section),
+        "video_preview": video_preview,
     })
 
 
@@ -277,14 +285,16 @@ async def create_job(
 async def create_transcription(
     audio: UploadFile = File(...),
     language: str = Form(config.TRANSCRIBE_LANGUAGE),
-    content_type: str = Form("song"),
+    section: str = Form("song"),
+    isolate: str = Form(""),
     script: str = Form(DEFAULT_SCRIPT),
+    video_preview: bool = Form(False),
 ):
     """Transcribe mode, phase 1: prepare the audio (and vocals) and return a Whisper draft.
 
     script: a config.SCRIPTS code, or "default" when the user has no saved choice."""
-    _, language, content_type = _clean_choices(
-        config.FORMAT_DEFAULT, language, content_type, config.TRANSCRIBE_LANGUAGE)
+    _, language, section = _clean_choices(
+        config.FORMAT_DEFAULT, language, section, config.TRANSCRIBE_LANGUAGE)
     _evict_finished_jobs()
     saved = _save_upload(audio)
     if isinstance(saved, JSONResponse):
@@ -293,7 +303,8 @@ async def create_transcription(
     return _queue(job_id, {
         "task": "transcribe", "mode": "transcribe", "created": time.time(),
         "audio_path": str(audio_path), "upload_dir": str(upload_dir),
-        "language": language, "content_type": content_type,
+        "language": language, "section": section, "isolate": clean_isolate(isolate, section),
+        "video_preview": video_preview,
         "script": script if script in SCRIPT_CODES else DEFAULT_SCRIPT,
     })
 
@@ -303,7 +314,7 @@ def approve_transcript(
     job_id: str,
     lyrics: str = Form(...),
     strip_tags: bool = Form(False),
-    video_format: str = Form(config.FORMAT_DEFAULT),
+    video_format: str = Form(""),
     language: str = Form(AUTO_LANGUAGE),
 ):
     """Transcribe mode, phase 2: align the approved text to the audio prepared in phase 1."""
@@ -312,14 +323,15 @@ def approve_transcript(
         return JSONResponse({"error": "This transcript has expired. Transcribe the file again."},
                             status_code=409)
     video_format, language, _ = _clean_choices(
-        video_format, language, job["content_type"], AUTO_LANGUAGE)
+        video_format, language, job["section"], AUTO_LANGUAGE)
     job.pop("finished", None)
     job.update(task="align", stage=job.get("stage", 2), lyrics_text=lyrics,
                strip_tags=strip_tags, video_format=video_format, language=language)
     return _queue(job_id, job)
 
 
-PUBLIC_KEYS = ("status", "stage", "steps", "message", "mode", "content_type", "srt_name",
+PUBLIC_KEYS = ("status", "stage", "steps", "message", "mode", "section", "isolate",
+               "music_detected", "srt_name",
                "job_dir", "cues", "timings", "warnings", "audio_ready", "draft_text",
                "detected_language", "detected_language_name", "script", "approximate_timing",
                "script_note")
@@ -331,7 +343,9 @@ def job_state(job_id: str):
     if not job:
         return JSONResponse({"error": "unknown job"}, status_code=404)
     state = {k: job[k] for k in PUBLIC_KEYS if k in job}
-    state["has_vocals"] = bool(job.get("ctx", {}).get("vocals_path"))
+    ctx = job.get("ctx", {})
+    state["has_vocals"] = bool(ctx.get("vocals_path"))
+    state["has_preview"] = bool(ctx.get("preview_path"))
     return state
 
 
@@ -368,6 +382,15 @@ def job_audio(job_id: str):
     return FileResponse(path, media_type=media)
 
 
+@app.get("/api/jobs/{job_id}/preview")
+def job_preview(job_id: str):
+    """A playable copy of the job's video, made only when the UI asked for one (video_preview)."""
+    path = JOBS.get(job_id, {}).get("ctx", {}).get("preview_path")
+    if not path:
+        return JSONResponse({"error": "not ready"}, status_code=404)
+    return FileResponse(path, media_type="video/mp4")
+
+
 app.mount("/", StaticFiles(directory=str(DIST), html=True), name="frontend")
 
 
@@ -380,7 +403,7 @@ if __name__ == "__main__":
     url = f"http://{config.HOST}:{config.PORT}"
     if not os.environ.get("SRT_NO_BROWSER"):
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
-    print(f"Song SRT Generator running at {url}")
+    print(f"SRT Generator running at {url}")
     try:
         uvicorn.run(app, host=config.HOST, port=config.PORT, log_level="warning")
     except OSError as e:

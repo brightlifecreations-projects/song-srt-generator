@@ -1,16 +1,19 @@
-"""Song SRT Generator — processing pipeline.
+"""SRT Generator — processing pipeline.
 
 All logic lives here; app.py is UI-only. Two flows share the same stages:
 
-- Lyrics/script: prepare audio → (song: isolate vocals) → align the given text → SRT.
-- Transcribe: prepare audio → (song: isolate vocals) → Whisper draft → the user edits
-  and approves it → align the approved text to the same audio → SRT. The vocals
-  are isolated once; approval reuses them.
+- Lyrics/script: prepare audio → (isolate the voice) → align the given text → SRT.
+- Transcribe: prepare audio → (isolate the voice) → Whisper draft → the user edits
+  and approves it → align the approved text to the same audio → SRT. The voice
+  is isolated once; approval reuses it.
+
+Every job belongs to a section (config.SECTIONS: song, drama, reels) that sets whether
+the voice is isolated by default and how the text is cut into subtitles.
 
 Also runnable from the CLI:
 
-    python pipeline.py <audio|video> <lyrics.txt> [vertical|horizontal] [language] [song|speech]
-    python pipeline.py --transcribe <audio|video> [language] [song|speech] [script=<code>]
+    python pipeline.py <audio|video> <lyrics.txt> [vertical|horizontal] [language] [song|drama|reels] [isolate=auto|on|off]
+    python pipeline.py --transcribe <audio|video> [language] [song|drama|reels] [isolate=…] [script=<code>]
 """
 
 import json
@@ -31,7 +34,7 @@ import config
 
 ROOT = Path(__file__).parent
 # Writable data (jobs, models, uploads). Defaults to the app folder; the macOS .app
-# sets SRT_DATA_DIR to ~/Library/Application Support/Song SRT Generator because its
+# sets SRT_DATA_DIR to ~/Library/Application Support/SRT Generator because its
 # bundle is read-only.
 DATA_DIR = Path(os.environ.get("SRT_DATA_DIR") or ROOT)
 JOBS_DIR = DATA_DIR / "jobs"
@@ -42,13 +45,41 @@ MODELS_DIR = DATA_DIR / "models"
 os.environ.setdefault("HF_HOME", str(MODELS_DIR / "hf"))
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac"}
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".mkv", ".webm"}
 ACCEPTED_EXTENSIONS = AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
 UNREADABLE_FILE = ("Couldn't read this file. Use MP3, WAV, M4A or FLAC audio, "
-                   "or MP4, MOV, MKV or WEBM video.")
+                   "or MP4, MOV, M4V, MKV or WEBM video.")
 
 AUTO_LANGUAGE = "auto"
-CONTENT_TYPES = ("song", "speech")
+SECTIONS = tuple(config.SECTIONS)  # ("song", "drama", "reels")
+ISOLATE_CHOICES = ("auto", "on", "off")
+
+
+def _tool(name: str) -> str:
+    """Path to ffmpeg/ffprobe: the bundled copy (data folder or app folder bin/) first, then PATH."""
+    exe = name + (".exe" if os.name == "nt" else "")
+    for folder in (DATA_DIR / "bin", ROOT / "bin"):
+        if (folder / exe).is_file():
+            return str(folder / exe)
+    return shutil.which(name) or name
+
+
+FFMPEG = _tool("ffmpeg")
+FFPROBE = _tool("ffprobe")
+# The separator packages run "ffmpeg" by name, so the bundled folder goes on PATH too.
+if os.path.isabs(FFMPEG):
+    os.environ["PATH"] = os.path.dirname(FFMPEG) + os.pathsep + os.environ.get("PATH", "")
+
+
+def clean_section(section: str | None) -> str:
+    """A section code; "speech" (V3.8's content type) means reels, anything unknown means song."""
+    if section == "speech":
+        return "reels"
+    return section if section in config.SECTIONS else "song"
+
+
+def clean_isolate(isolate: str | None, section: str) -> str:
+    return isolate if isolate in ISOLATE_CHOICES else config.SECTIONS[section]["isolate"]
 
 MIN_CUE_SECONDS = 0.6
 OVERLAP_GAP = 0.010  # 10 ms pulled between overlapping cues
@@ -74,7 +105,7 @@ def probe_duration(audio_path: Path) -> float:
     """Return audio duration in seconds via ffprobe."""
     try:
         out = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+            [FFPROBE, "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)],
             capture_output=True, text=True, timeout=60,
         )
@@ -90,7 +121,7 @@ def probe_duration(audio_path: Path) -> float:
 
 def _has_audio_stream(path: Path) -> bool:
     out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+        [FFPROBE, "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
          "-of", "csv=p=0", str(path)],
         capture_output=True, text=True, timeout=60,
     )
@@ -163,7 +194,7 @@ def preprocess_lyrics(raw_text: str, strip_tags: bool = True) -> tuple[list[str]
 def extract_audio(video_path: Path, out_path: Path) -> Path:
     """Write the video's first audio track as 44.1 kHz stereo WAV (what the separator expects)."""
     proc = subprocess.run(
-        ["ffmpeg", "-y", "-v", "error", "-i", str(video_path), "-map", "0:a:0", "-vn",
+        [FFMPEG, "-y", "-v", "error", "-i", str(video_path), "-map", "0:a:0", "-vn",
          "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", str(out_path)],
         capture_output=True, text=True,
     )
@@ -173,6 +204,65 @@ def extract_audio(video_path: Path, out_path: Path) -> Path:
             "or upload the audio on its own."
         )
     return out_path
+
+
+def make_preview(video_path: Path, out_path: Path) -> Path | None:
+    """A small H.264/AAC copy for the subtitle preview, for videos the web view can't play
+    (MKV, some codecs). At most 720 px tall. Returns None if ffmpeg can't make one."""
+    proc = subprocess.run(
+        [FFMPEG, "-y", "-v", "error", "-i", str(video_path), "-map", "0:v:0", "-map", "0:a:0",
+         "-vf", "scale=-2:'min(720,ih)'", "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+         str(out_path)],
+        capture_output=True, text=True,
+    )
+    return out_path if proc.returncode == 0 and out_path.exists() else None
+
+
+# ---------------------------------------------------------------------------
+# Stage 1.75 (isolation "auto"): is there background music?
+
+MUSIC_CHECK_SECONDS = 30.0
+
+
+def _mean_volume_db(args: list[str]) -> float:
+    proc = subprocess.run([FFMPEG, "-v", "info", *args, "-f", "null", "-"],
+                          capture_output=True, text=True)
+    match = re.search(r"mean_volume: (-?[\d.]+|-inf) dB", proc.stderr)
+    return float(match.group(1)) if match else -91.0
+
+
+def detect_music(audio_path: Path, duration: float, job_dir: Path, log: logging.Logger) -> dict:
+    """Separate a 30-second excerpt from the middle and compare what's left after removing the
+    voice (mix − voice) with the voice itself. Returns {"music", "voice_db", "background_db",
+    "vocals_path" (the whole file's vocals when the excerpt was the whole file, else None)}."""
+    check_dir = job_dir / "music-check"
+    check_dir.mkdir()
+    whole = duration <= MUSIC_CHECK_SECONDS + 5
+    excerpt = check_dir / "excerpt.wav"
+    start = 0.0 if whole else duration / 2 - MUSIC_CHECK_SECONDS / 2
+    subprocess.run([FFMPEG, "-y", "-v", "error", "-ss", f"{start:.2f}", "-i", str(audio_path),
+                    *([] if whole else ["-t", str(MUSIC_CHECK_SECONDS)]),
+                    "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", str(excerpt)],
+                   capture_output=True, text=True, check=True)
+    vocals = separate_vocals(excerpt, check_dir, log)
+    voice_db = _mean_volume_db(["-i", str(vocals), "-af", "volumedetect"])
+    background_db = _mean_volume_db([
+        "-i", str(excerpt), "-i", str(vocals), "-filter_complex",
+        "[1:a]volume=-1[neg];[0:a][neg]amix=inputs=2:normalize=0,volumedetect"])
+    music = voice_db > -60 and background_db - voice_db > config.MUSIC_DETECT_DB
+    log.info("Music check (%.0f s excerpt from %.1f s): voice %.1f dB, background %.1f dB "
+             "(%.1f dB relative, threshold %.1f) -> %s",
+             duration if whole else MUSIC_CHECK_SECONDS, start, voice_db, background_db,
+             background_db - voice_db, config.MUSIC_DETECT_DB,
+             "music detected" if music else "no music")
+    whole_vocals = None
+    if whole and music:
+        whole_vocals = job_dir / "vocals.wav"
+        vocals.rename(whole_vocals)
+    shutil.rmtree(check_dir, ignore_errors=True)
+    return {"music": music, "voice_db": voice_db, "background_db": background_db,
+            "vocals_path": whole_vocals}
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +426,7 @@ SILENCE_DB = -60.0
 
 def _max_volume_db(audio_path: Path) -> float:
     proc = subprocess.run(
-        ["ffmpeg", "-v", "info", "-i", str(audio_path), "-af", "volumedetect", "-f", "null", "-"],
+        [FFMPEG, "-v", "info", "-i", str(audio_path), "-af", "volumedetect", "-f", "null", "-"],
         capture_output=True, text=True,
     )
     match = re.search(r"max_volume: (-?[\d.]+) dB", proc.stderr)
@@ -528,13 +618,29 @@ def _split_by_duration(piece: list, max_seconds: float | None) -> list[list]:
     return pieces
 
 
-def chunk_segments(segments, max_chars: int, max_seconds: float | None = None) -> list[dict]:
+def _split_by_words(piece: list, max_words: int | None) -> list[list]:
+    """Split a cue's words into balanced pieces of at most max_words words."""
+    if not max_words or len(piece) <= max_words:
+        return [piece]
+    count = math.ceil(len(piece) / max_words)
+    size, extra = divmod(len(piece), count)
+    pieces, pos = [], 0
+    for i in range(count):
+        n = size + (1 if i < extra else 0)
+        pieces.append(piece[pos:pos + n])
+        pos += n
+    return pieces
+
+
+def chunk_segments(segments, max_chars: int, max_seconds: float | None = None,
+                   pause_split: float | None = None, max_words: int | None = None) -> list[dict]:
     """Turn aligned lyric lines into single-line cues.
 
     Rules (in priority order): never merge across the user's lyric lines; a comma or
-    full stop always ends a cue, and an opening ¿ or ¡ always starts one; no cue exceeds
-    max_chars (split at the most balanced word boundary); with max_seconds (speech), no
-    cue lasts longer than that; cue times come from word-level timestamps.
+    full stop always ends a cue, and an opening ¿ or ¡ always starts one; with pause_split,
+    a silence that long between two words starts a new cue; no cue exceeds max_chars
+    (split at the most balanced word boundary), max_words or max_seconds; cue times come
+    from word-level timestamps. The section (config.SECTIONS) supplies the optional limits.
     """
     cues = []
     for seg in segments:
@@ -543,7 +649,8 @@ def chunk_segments(segments, max_chars: int, max_seconds: float | None = None) -
             continue
         runs, cur = [], []
         for w in words:
-            if cur and OPENING_PUNCT.search(w.word.strip()):
+            if cur and (OPENING_PUNCT.search(w.word.strip())
+                        or (pause_split and w.start - cur[-1].end >= pause_split)):
                 runs.append(cur)
                 cur = []
             cur.append(w)
@@ -554,7 +661,8 @@ def chunk_segments(segments, max_chars: int, max_seconds: float | None = None) -
             runs.append(cur)
         for run in runs:
             pieces = [p for chunk in _split_run(run, max_chars)
-                      for p in _split_by_duration(chunk, max_seconds)]
+                      for part in _split_by_words(chunk, max_words)
+                      for p in _split_by_duration(part, max_seconds)]
             for piece in pieces:
                 cues.append({
                     "start": float(piece[0].start),
@@ -617,7 +725,7 @@ def export_stem(vocals_wav: Path, job_dir: Path) -> Path:
         return vocals_wav
     out = job_dir / "vocals.mp3"
     proc = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(vocals_wav), "-b:a", "320k", str(out)],
+        [FFMPEG, "-y", "-i", str(vocals_wav), "-b:a", "320k", str(out)],
         capture_output=True, text=True,
     )
     if proc.returncode != 0 or not out.exists():
@@ -650,10 +758,14 @@ def _job_logger(job_dir: Path) -> logging.Logger:
     return log
 
 
-def flow_steps(mode: str, content_type: str) -> list[tuple[set, str]]:
+ISOLATE_TITLES = {"song": "Isolate vocals", "drama": "Isolate dialogue", "reels": "Isolate voice"}
+
+
+def flow_steps(mode: str, section: str, isolate: str = "on") -> list[tuple[set, str]]:
     """The progress steps a flow shows, as (stage keys, title). mode: "lyrics" or "transcribe"."""
-    song = content_type == "song"
-    first = ({"prepare", "separate"}, "Isolate vocals" if song else "Prepare audio")
+    song = section == "song"
+    first = ({"prepare", "separate"},
+             ISOLATE_TITLES[section] if isolate == "on" else "Prepare audio")
     if mode == "transcribe":
         return [first, ({"transcribe"}, "Transcribe"),
                 ({"align"}, "Align transcript"), ({"build"}, "Build subtitles")]
@@ -678,19 +790,26 @@ def _unexpected(log: logging.Logger, job_dir: Path):
     )
 
 
-def start_job(audio_path, content_type: str = "song", report=lambda key, msg: None) -> dict:
-    """Validate, create the job folder, get the audio out of a video, and isolate the
-    vocals for songs. Returns the job context the later stages work from."""
+def start_job(audio_path, section: str = "song", report=lambda key, msg: None,
+              isolate: str | None = None, video_preview: bool = False) -> dict:
+    """Validate, create the job folder, get the audio out of a video, and isolate the voice
+    (isolate "on", or "auto" when background music is detected). Returns the job context
+    the later stages work from.
+
+    video_preview: also keep a small playable copy of the video (preview.mp4), for videos
+    the UI's web view can't play itself."""
     audio_path = Path(audio_path)
-    content_type = content_type if content_type in CONTENT_TYPES else "song"
+    section = clean_section(section)
+    isolate = clean_isolate(isolate, section)
     duration, duration_warning = validate_audio(audio_path)
 
     job_dir = _make_job_dir(audio_path)
     log = _job_logger(job_dir)
-    log.info("Input: %s (%.1fs), content=%s", audio_path.name, duration, content_type)
+    log.info("Input: %s (%.1fs), section=%s, isolate=%s", audio_path.name, duration, section, isolate)
     ctx = {
         "source_file": audio_path.name, "stem": audio_path.stem, "job_dir": job_dir,
-        "log": log, "duration": duration, "content_type": content_type,
+        "log": log, "duration": duration, "section": section, "isolate": isolate,
+        "music_detected": None, "preview_path": None,
         "warnings": [duration_warning] if duration_warning else [], "timings": {},
         "vocals_path": None, "detected_language": None,
     }
@@ -704,17 +823,30 @@ def start_job(audio_path, content_type: str = "song", report=lambda key, msg: No
             report("prepare", "Step 1 — extracting the audio from the video…")
             input_audio = extract_audio(audio_path, job_dir / "input.wav")
             log.info("Extracted audio from %s", audio_path.name)
+            if video_preview:
+                report("prepare", "Step 1 — making a preview copy of the video…")
+                ctx["preview_path"] = make_preview(audio_path, job_dir / "preview.mp4")
+                log.info("Preview copy: %s", "preview.mp4" if ctx["preview_path"] else "failed")
         else:
             input_audio = job_dir / f"input{audio_path.suffix.lower()}"
             shutil.copy2(audio_path, input_audio)
         ctx["input_audio"] = input_audio
-        if content_type == "song":
-            report("separate", "Step 1 — isolating vocals (roughly 10–60 seconds)…")
+        separate = isolate == "on"
+        if isolate == "auto":
+            report("prepare", "Step 1 — checking for background music…")
+            check = detect_music(input_audio, duration, job_dir, log)
+            ctx["music_detected"] = separate = check["music"]
+            ctx["vocals_path"] = check["vocals_path"]
+        if separate and ctx["vocals_path"] is None:
+            report("separate", f"Step 1 — {ISOLATE_TITLES[section].lower().replace('isolate', 'isolating')} "
+                               "(roughly 10–60 seconds)…")
             ctx["vocals_path"] = separate_vocals(input_audio, job_dir, log)
+        if separate:
             ctx["source_path"] = ctx["vocals_path"]
-            log.info("Vocals isolated -> %s", ctx["vocals_path"].name)
+            log.info("Voice isolated -> %s", ctx["vocals_path"].name)
         else:
-            ctx["source_path"] = input_audio  # speech: no music to remove
+            ctx["source_path"] = input_audio  # nothing to remove: use the audio as is
+            log.info("Voice not isolated (isolate=%s)", isolate)
         ctx["timings"]["separate_seconds"] = round(time.perf_counter() - t0, 2)
     except PipelineError:
         raise
@@ -827,23 +959,26 @@ def align_and_write(ctx: dict, lyrics_text: str, strip_tags: bool = True,
         whisper_language = None  # nothing is aligned; timings come from Whisper's segments
     max_chars = (config.MAX_CHARS_VERTICAL if video_format == "vertical"
                  else config.MAX_CHARS_HORIZONTAL)
-    # Speech, and translations (whose phrase timings can run long), get the 7 s cap.
-    max_seconds = (config.MAX_CUE_SECONDS_SPEECH
-                   if ctx["content_type"] == "speech" or approximate else None)
+    rules = config.SECTIONS[ctx["section"]]
+    max_seconds = rules["max_cue_seconds"]
+    if approximate:  # translation phrase timings can run long
+        max_seconds = min(max_seconds or math.inf, config.MAX_CUE_SECONDS_TRANSLATION)
+    pause_split, max_words = rules["pause_split_seconds"], rules["max_words"]
     lyric_lines, lyric_warning = preprocess_lyrics(lyrics_text, strip_tags=strip_tags)
     log, job_dir, timings = ctx["log"], ctx["job_dir"], ctx["timings"]
     warnings = ctx["warnings"] + ([lyric_warning] if lyric_warning else [])
-    log.info("%s %d lines, strip_tags=%s, format=%s (max %d chars/line, max %s s/cue), "
-             "language=%s, script=%s (whisper code %s)",
+    log.info("%s %d lines, section=%s, strip_tags=%s, format=%s (max %d chars/line, max %s s/cue, "
+             "max %s words, pause split %s s), language=%s, script=%s (whisper code %s)",
              "Timing (approximate, no alignment)" if approximate else "Aligning",
-             len(lyric_lines), strip_tags, video_format, max_chars, max_seconds, language,
-             script, whisper_language)
+             len(lyric_lines), ctx["section"], strip_tags, video_format, max_chars, max_seconds,
+             max_words, pause_split, language, script, whisper_language)
     if lyric_warning:
         log.warning(lyric_warning)
     (job_dir / "lyrics.txt").write_text("\n".join(lyric_lines) + "\n", encoding="utf-8")
 
     try:
-        song = ctx["content_type"] == "song"
+        song = ctx["section"] == "song"
+        isolated = ctx["source_path"] == ctx["vocals_path"]
         t0 = time.perf_counter()
         if approximate:
             report("align", "Timing the translation from Whisper's phrase timings…")
@@ -859,16 +994,22 @@ def align_and_write(ctx: dict, lyrics_text: str, strip_tags: bool = True,
 
         report("build", "Building the SRT…")
         t0 = time.perf_counter()
-        cues = sanitize_cues(chunk_segments(segments, max_chars, max_seconds))
+        cues = sanitize_cues(chunk_segments(segments, max_chars, max_seconds, pause_split, max_words))
         srt_path = job_dir / f"{ctx['stem']}.srt"
         write_srt(cues, srt_path)
 
         cues_json = {
             "source_file": ctx["source_file"],
-            "content_type": ctx["content_type"],
+            "section": ctx["section"],
+            "content_type": "song" if song else "speech",
+            "isolate": ctx["isolate"],
+            "isolated": isolated,
+            "music_detected": ctx["music_detected"],
             "video_format": video_format,
             "max_chars_per_line": max_chars,
             "max_cue_seconds": max_seconds,
+            "max_words_per_cue": max_words,
+            "pause_split_seconds": pause_split,
             "early_appear_seconds": config.EARLY_APPEAR_SECONDS,
             "model_size": config.MODEL_SIZE,
             "language": language,
@@ -878,8 +1019,8 @@ def align_and_write(ctx: dict, lyrics_text: str, strip_tags: bool = True,
             "spoken_language": ctx.get("detected_language"),
             "task": ctx.get("task"),
             "timing": "approximate" if approximate else "aligned",
-            "separator_engine": config.SEPARATOR_ENGINE if song else None,
-            "separator_model": config.SEPARATOR_MODEL if song else None,
+            "separator_engine": config.SEPARATOR_ENGINE if isolated else None,
+            "separator_model": config.SEPARATOR_MODEL if isolated else None,
             "duration_seconds": round(ctx["duration"], 2),
             "timings": timings,
             "cues": cues,
@@ -888,7 +1029,7 @@ def align_and_write(ctx: dict, lyrics_text: str, strip_tags: bool = True,
             json.dumps(cues_json, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
-        stem_path = export_stem(ctx["vocals_path"], job_dir) if song else None
+        stem_path = export_stem(ctx["vocals_path"], job_dir) if isolated else None
         timings["outputs_seconds"] = round(time.perf_counter() - t0, 2)
         log.info("Outputs written in %.1fs. Timings: %s", timings["outputs_seconds"], timings)
         return {
@@ -909,19 +1050,24 @@ def align_and_write(ctx: dict, lyrics_text: str, strip_tags: bool = True,
 
 def run_pipeline(audio_path, lyrics_text: str, strip_tags: bool = True,
                  video_format: str = None, language: str = None,
-                 progress_callback=None, content_type: str = "song") -> dict:
+                 progress_callback=None, section: str = "song", isolate: str = None) -> dict:
     """Lyrics/script flow in one call. Returns a result dict with paths and metadata.
 
-    video_format: "vertical" (9:16, short lines) or "horizontal" (16:9).
+    video_format: "vertical" (9:16, short lines) or "horizontal" (16:9); defaults to the
+        section's format.
     language: dropdown choice from config.LANGUAGES; defaults to config.LANGUAGE.
         Aliases like "hinglish" are mapped to a Whisper code via config.LANGUAGE_ALIASES.
-    content_type: "song" isolates the vocals first; "speech" aligns the audio as is.
+    section: "song", "drama" or "reels" (config.SECTIONS); isolate: "auto", "on" or "off"
+        (defaults to the section's preset).
     progress_callback(step:int, total:int, message:str) drives UI status text.
     Raises PipelineError with a user-safe message on any failure.
     """
     preprocess_lyrics(lyrics_text, strip_tags=strip_tags)  # fail fast, before heavy work
-    report = make_reporter(flow_steps("lyrics", content_type), progress_callback)
-    ctx = start_job(audio_path, content_type, report)
+    section = clean_section(section)
+    isolate = clean_isolate(isolate, section)
+    video_format = video_format or config.SECTIONS[section]["format"]
+    report = make_reporter(flow_steps("lyrics", section, isolate), progress_callback)
+    ctx = start_job(audio_path, section, report, isolate)
     return align_and_write(ctx, lyrics_text, strip_tags=strip_tags, video_format=video_format,
                            language=language, report=report)
 
@@ -935,37 +1081,41 @@ def _progress(step, total, message):
 
 def main(argv: list[str]) -> int:
     codes = [code for code, _ in config.LANGUAGES]
+    sections = "|".join(SECTIONS)
     usage = ("Usage: python pipeline.py <audio|video> <lyrics.txt> [vertical|horizontal] "
-             f"[{'|'.join(codes)}] [song|speech]\n"
-             f"       python pipeline.py --transcribe <audio|video> [{'|'.join(codes)}] [song|speech] "
-             f"[script={'|'.join(SCRIPT_CODES)}]")
+             f"[{'|'.join(codes)}] [{sections}] [isolate=auto|on|off]\n"
+             f"       python pipeline.py --transcribe <audio|video> [{'|'.join(codes)}] [{sections}] "
+             f"[isolate=auto|on|off] [script={'|'.join(SCRIPT_CODES)}]")
     transcribe = bool(argv) and argv[0] == "--transcribe"
     if transcribe:
         argv = argv[1:]
     positional = 1 if transcribe else 2
-    if not positional <= len(argv) <= positional + 4:
+    if not positional <= len(argv) <= positional + 5:
         print(usage)
         return 2
-    video_format = language = content_type = None
+    video_format = language = section = isolate = None
     script = DEFAULT_SCRIPT
     for arg in argv[positional:]:
         if transcribe and arg.startswith("script=") and arg[7:] in SCRIPT_CODES:
             script = arg[7:]
+        elif arg.startswith("isolate=") and arg[8:] in ISOLATE_CHOICES and isolate is None:
+            isolate = arg[8:]
         elif arg in ("vertical", "horizontal") and video_format is None and not transcribe:
             video_format = arg
         elif arg in codes and language is None:
             language = arg
-        elif arg in CONTENT_TYPES and content_type is None:
-            content_type = arg
+        elif (arg in SECTIONS or arg == "speech") and section is None:
+            section = clean_section(arg)
         else:
             print(usage)
             return 2
-    content_type = content_type or "song"
+    section = section or "song"
+    isolate = clean_isolate(isolate, section)
 
     try:
         if transcribe:
-            report = make_reporter(flow_steps("transcribe", content_type), _progress)
-            ctx = start_job(Path(argv[0]), content_type, report)
+            report = make_reporter(flow_steps("transcribe", section, isolate), _progress)
+            ctx = start_job(Path(argv[0]), section, report, isolate)
             draft = run_transcription(ctx, language, report, script)
             print(f"Job folder: {ctx['job_dir']}")
             print(f"Language:   {draft['detected_language_name']} ({draft['detected_language']})")
@@ -979,7 +1129,7 @@ def main(argv: list[str]) -> int:
         result = run_pipeline(Path(argv[0]), Path(argv[1]).read_text(encoding="utf-8"),
                               strip_tags=config.STRIP_TAGS_DEFAULT, video_format=video_format,
                               language=language, progress_callback=_progress,
-                              content_type=content_type)
+                              section=section, isolate=isolate)
     except PipelineError as e:
         print(f"FAILED: {e}")
         return 1

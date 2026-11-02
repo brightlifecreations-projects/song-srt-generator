@@ -1,24 +1,46 @@
 #!/bin/bash
-# Song SRT Generator.app entry point (Contents/MacOS/launcher).
+# SRT Generator.app entry point (Contents/MacOS/launcher).
 #
 # The bundle is read-only. Everything writable — Python, the venv, the AI models,
-# jobs/ — lives in ~/Library/Application Support/Song SRT Generator/, which app
-# updates reuse (models are never re-downloaded). This script only bootstraps a
-# Python with pywebview so launcher.py can show the setup/progress window; all
-# the heavy setup (packages, models, warmup) happens there.
+# jobs/ — lives in ~/Library/Application Support/SRT Generator/, which app
+# updates reuse (models are never re-downloaded). Versions before 4.0 were called
+# "Song SRT Generator"; their folder is moved here on the first launch.
+#
+# This script only bootstraps a Python with pywebview so launcher.py can show the
+# setup/progress window; all the heavy setup (packages, models, warmup) happens there.
 
 RES="$(cd "$(dirname "$0")/../Resources" && pwd)"
-SUPPORT="$HOME/Library/Application Support/Song SRT Generator"
+SUPPORT="$HOME/Library/Application Support/SRT Generator"
+OLD_SUPPORT="$HOME/Library/Application Support/Song SRT Generator"
 VENV="$SUPPORT/venv"
 PY="$VENV/bin/python"
 
 alert() {
-  osascript -e "display alert \"Song SRT Generator\" message \"$1\" as critical" >/dev/null 2>&1
+  osascript -e "display alert \"SRT Generator\" message \"$1\" as critical" >/dev/null 2>&1
 }
 
 if [ "$(uname -m)" != "arm64" ]; then
   alert "This app is for Apple Silicon Macs (M1, M2, M3, M4). This Mac has an Intel processor."
   exit 1
+fi
+
+# 3.x → 4.0: move the old data folder (models, jobs, settings) instead of downloading again.
+if [ ! -e "$SUPPORT" ] && [ -d "$OLD_SUPPORT" ]; then
+  OLD_PID="$(cat "$OLD_SUPPORT/app.lock" 2>/dev/null)"
+  if [ -n "$OLD_PID" ] && ps -p "$OLD_PID" -o command= 2>/dev/null | grep -q "launcher.py"; then
+    alert "Song SRT Generator (the old version) is still open. Quit it, then open SRT Generator again."
+    exit 1
+  fi
+  if ! mv "$OLD_SUPPORT" "$SUPPORT"; then
+    alert "Couldn't move your data from the Song SRT Generator folder. Details: ~/Library/Application Support/Song SRT Generator"
+    exit 1
+  fi
+  # The venv and uv's Python links point into the old folder by absolute path, so they are
+  # rebuilt (from the moved package cache); the models, jobs and settings stay as they are.
+  rm -rf "$SUPPORT/venv" "$SUPPORT/pycache" "$SUPPORT/app.lock"
+  find "$SUPPORT/python" -maxdepth 1 -type l -delete 2>/dev/null
+  echo "=== $(date) moved $OLD_SUPPORT here (models, jobs and settings kept; venv rebuilt)" >> "$SUPPORT/install.log"
+  touch "$SUPPORT/migrated-from-3x"  # launcher.py moves the old app to the Trash
 fi
 
 mkdir -p "$SUPPORT/bin"
@@ -47,18 +69,19 @@ if ! "$PY" -c "import webview" >/dev/null 2>&1; then
   # First launch: fetch Python 3.10 + pywebview (~40 MB) so the setup window can open.
   osascript -e 'display dialog "Getting ready for the first launch…
 
-This takes about a minute. A setup window opens next." buttons {"OK"} default button 1 with title "Song SRT Generator" with icon note giving up after 900' >/dev/null 2>&1 &
+This takes about a minute. A setup window opens next." buttons {"OK"} default button 1 with title "SRT Generator" with icon note giving up after 900' >/dev/null 2>&1 &
   DIALOG=$!
   grep -iE '^(bottle|proxy-tools|pyobjc|pywebview|typing.extensions)' "$SRT_APP_DIR/requirements.txt" > bootstrap-requirements.txt
+  rm -f installed.json  # a fresh venv needs the full setup (packages + warmup) again
   {
     echo "=== bootstrap $(date)"
-    bin/uv venv --allow-existing --python 3.10 "$VENV" &&
+    bin/uv venv --clear --python 3.10 "$VENV" &&
       bin/uv pip install --python "$PY" -r bootstrap-requirements.txt
   } >> install.log 2>&1
   STATUS=$?
   kill "$DIALOG" 2>/dev/null
   if [ $STATUS -ne 0 ]; then
-    alert "First-time setup couldn't download what it needs. Check your internet connection and open the app again. Details: ~/Library/Application Support/Song SRT Generator/install.log"
+    alert "First-time setup couldn't download what it needs. Check your internet connection and open the app again. Details: ~/Library/Application Support/SRT Generator/install.log"
     exit 1
   fi
 fi

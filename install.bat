@@ -1,5 +1,5 @@
 @echo off
-REM Song SRT Generator - one-time installer for Windows (x64).
+REM SRT Generator - one-time installer for Windows (x64).
 REM Everything installs INSIDE this folder. Nothing on your PC is touched
 REM (except one standard Microsoft component, if it's missing).
 REM Needs internet once (Python runtime + AI models). Safe to re-run anytime.
@@ -7,7 +7,7 @@ setlocal
 cd /d "%~dp0"
 
 echo.
-echo   Song SRT Generator - installing
+echo   SRT Generator - installing
 echo   Everything stays inside this folder.
 echo.
 
