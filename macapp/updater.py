@@ -42,9 +42,10 @@ def start(app_path: Path, log=print) -> bool:
     driver = sparkle["SPUStandardUserDriver"].alloc().initWithHostBundle_delegate_(host, None)
     updater = sparkle["SPUUpdater"].alloc().initWithHostBundle_applicationBundle_userDriver_delegate_(
         host, host, driver, None)
-    ok, error = updater.startUpdater_(None)
-    if not ok:
-        log(f"Sparkle: couldn't start: {error}")
+    # pyobjc has no metadata for Sparkle's NSError** argument here, so only the BOOL comes back.
+    started = updater.startUpdater_(None)
+    if not (started[0] if isinstance(started, tuple) else started):
+        log(f"Sparkle: couldn't start: {started}")
         return False
     _state.update(updater=updater, driver=driver, target=SRTUpdateMenuTarget.alloc().init())
 
