@@ -31,6 +31,7 @@ from datetime import datetime
 from pathlib import Path
 
 import config
+import corrections
 
 ROOT = Path(__file__).parent
 # Writable data (jobs, models, uploads). Defaults to the app folder; the macOS .app
@@ -479,7 +480,7 @@ def resolve_script(script: str, language: str, audio_path: Path, log: logging.Lo
 
 
 def transcribe_audio(audio_path: Path, language: str | None, log: logging.Logger,
-                     script: str = "same") -> dict:
+                     script: str = "same", hotwords: str = "") -> dict:
     """Whisper transcription of the vocals (song) or the audio (speech).
 
     script picks the draft's writing system (config.SCRIPTS): it can force the Whisper
@@ -487,6 +488,8 @@ def transcribe_audio(audio_path: Path, language: str | None, log: logging.Logger
     Returns {"lines", "language" (spoken, as Whisper detected or was told), "transcribe_language"
     (code forced, or None for auto), "task", "segments" ([(start, end, text)], for translation)}.
     Uses the same faster-whisper model as alignment, so nothing extra is downloaded.
+    hotwords: words Whisper should expect (from the corrections file), sent with every
+    30-second window.
     """
     if _max_volume_db(audio_path) < SILENCE_DB:
         raise PipelineError("This file is silent, so there's nothing to transcribe.")
@@ -497,7 +500,8 @@ def transcribe_audio(audio_path: Path, language: str | None, log: logging.Logger
         # condition_on_previous_text=False stops Whisper repeating a line in a loop,
         # which it otherwise tends to do on sung choruses.
         result = model.transcribe(str(audio_path), language=code, task=task,
-                                  beam_size=5, condition_on_previous_text=False)
+                                  beam_size=5, condition_on_previous_text=False,
+                                  **({"hotwords": hotwords} if hotwords else {}))
     except MemoryError:
         raise PipelineError(
             "This machine ran out of memory. Open config.py and set MODEL_SIZE "
@@ -869,23 +873,39 @@ def run_transcription(ctx: dict, language: str = None, report=lambda key, msg: N
     try:
         t0 = time.perf_counter()
         script = resolve_script(script, language, ctx["source_path"], log)
-        result = transcribe_audio(ctx["source_path"], language, log, script)
+        rows, table, hotwords = _corrections_for(ctx, script, language)
+        result = transcribe_audio(ctx["source_path"], language, log, script, hotwords)
         ctx["timings"]["transcribe_seconds"] = round(time.perf_counter() - t0, 2)
         ctx.update(detected_language=result["language"], script=script,
                    transcribe_language=result["transcribe_language"], task=result["task"],
                    translation_segments=result["segments"] if script == "english" else None)
-        draft = "\n".join(result["lines"])
-        (job_dir / "transcript-draft.txt").write_text(draft + "\n", encoding="utf-8")
+        whisper_draft = "\n".join(result["lines"])
+        (job_dir / "transcript-draft.txt").write_text(whisper_draft + "\n", encoding="utf-8")
         log.info("Transcribed %d lines in %.1fs: language choice=%s, script=%s, task=%s, "
                  "whisper code forced=%s, spoken language=%s",
                  len(result["lines"]), ctx["timings"]["transcribe_seconds"], language, script,
                  result["task"], result["transcribe_language"], result["language"])
+        # The table depends on the spoken language for "same"; it's known for sure only now.
+        actual_table = corrections.table_for(script, result["language"])
+        if actual_table != table:
+            rows = _corrections_rows(ctx, actual_table)
+        draft, hits = corrections.apply(whisper_draft, rows)
+        if hits:
+            (job_dir / "transcript-autocorrected.txt").write_text(draft + "\n", encoding="utf-8")
+            log.info("Auto-corrected %d words from the %s corrections: %s", len(hits), actual_table,
+                     ", ".join(f"{h['original']} -> {h['replacement']}" for h in hits))
+        ctx.update(whisper_draft=whisper_draft, corrections_table=actual_table,
+                   auto_corrections=hits, recorded_pairs=ctx.get("recorded_pairs") or {})
     except PipelineError:
         raise
     except Exception:
         raise _unexpected(log, job_dir)
     return {
         "draft_text": draft,
+        "whisper_draft": whisper_draft,
+        "auto_corrections": hits,
+        "corrections_table": actual_table,
+        "hotwords": hotwords,
         "detected_language": result["language"],
         "detected_language_name": language_name(result["language"]),
         "script": script,
@@ -893,6 +913,73 @@ def run_transcription(ctx: dict, language: str = None, report=lambda key, msg: N
         "script_note": script_note(language, result["language"], draft, script,
                                    result["urdu_converted"]),
     }
+
+
+def _corrections_rows(ctx: dict, table: str) -> dict:
+    """The table's rows from corrections.md. A hand-edited file with errors is skipped with a
+    warning (the transcription itself goes on)."""
+    try:
+        return corrections.load(DATA_DIR).get(table, {})
+    except corrections.CorrectionsError as e:
+        warning = (f"Your corrections file has {len(e.errors)} bad row(s), so it wasn't used: "
+                   f"{e.errors[0]}. Fix it in the Corrections tab.")
+        if warning not in ctx["warnings"]:
+            ctx["warnings"].append(warning)
+            ctx["log"].warning(warning)
+        return {}
+
+
+def _corrections_for(ctx: dict, script: str, language: str) -> tuple[dict, str, str]:
+    """Before transcribing: the corrections table this draft will most likely use, and its most
+    frequent correct words as Whisper hotwords (counted with Whisper's own tokenizer)."""
+    spoken = whisper_code(language, transcribing=True)
+    if script == "same" and spoken is None and corrections.path(DATA_DIR).exists():
+        spoken = detect_language(ctx["source_path"])
+    table = corrections.table_for(script, spoken)
+    rows = _corrections_rows(ctx, table)
+    words = ""
+    if rows:
+        model = _load_align_model()
+        tokenizer = getattr(model, "hf_tokenizer", None)
+        count = (lambda s: len(tokenizer.encode(s, add_special_tokens=False).ids)) if tokenizer else None
+        words = corrections.hotwords(rows, count)
+        if words:
+            ctx["log"].info("Hotwords for Whisper (%s corrections, %d tokens max): %s",
+                            table, corrections.HOTWORD_TOKENS, words)
+    ctx["hotwords"] = words
+    return rows, table, words
+
+
+def record_approval(ctx: dict, approved_text: str) -> list[dict]:
+    """After an approved transcript is timed: save the draft, the approved text and their word
+    diff in the job folder, and add the fixes to corrections.md. Approving the same job again
+    only adds what's new since the last approval."""
+    from collections import Counter
+
+    job_dir, log = ctx["job_dir"], ctx["log"]
+    draft = ctx.get("whisper_draft")
+    if draft is None:
+        return []
+    (job_dir / "approved-text.txt").write_text(approved_text.strip() + "\n", encoding="utf-8")
+    diff = corrections.diff_lines(draft, approved_text)
+    (job_dir / "corrections-diff.md").write_text(
+        f"# Whisper's draft vs the approved text\n\nTable: {ctx['corrections_table']}\n\n"
+        + corrections.diff_markdown(diff), encoding="utf-8")
+    (job_dir / "corrections-diff.json").write_text(json.dumps(
+        {"table": ctx["corrections_table"], "whisper_draft": draft, "approved": approved_text,
+         "auto_corrections": ctx.get("auto_corrections", []), "diff": diff},
+        indent=2, ensure_ascii=False), encoding="utf-8")
+    pairs = Counter(corrections.learnable(diff))
+    new = list((pairs - Counter(ctx["recorded_pairs"])).elements())
+    ctx["recorded_pairs"] = dict(pairs | Counter(ctx["recorded_pairs"]))
+    try:
+        changed = corrections.record(DATA_DIR, ctx["corrections_table"], new)
+    except corrections.CorrectionsError as e:
+        log.warning("corrections.md has errors, nothing was added: %s", e)
+        return []
+    log.info("Corrections recorded (%s): %s", ctx["corrections_table"],
+             ", ".join(f"{c['wrong']} -> {c['correct']} ({c['change']})" for c in changed) or "none")
+    return changed
 
 
 def approximate_segments(segments: list[tuple], lines: list[str]) -> list:
@@ -1019,6 +1106,9 @@ def align_and_write(ctx: dict, lyrics_text: str, strip_tags: bool = True,
             "spoken_language": ctx.get("detected_language"),
             "task": ctx.get("task"),
             "timing": "approximate" if approximate else "aligned",
+            "corrections_table": ctx.get("corrections_table"),
+            "auto_corrections": len(ctx.get("auto_corrections") or []),
+            "hotwords": ctx.get("hotwords") or None,
             "separator_engine": config.SEPARATOR_ENGINE if isolated else None,
             "separator_model": config.SEPARATOR_MODEL if isolated else None,
             "duration_seconds": round(ctx["duration"], 2),

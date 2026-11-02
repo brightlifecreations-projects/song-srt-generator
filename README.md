@@ -62,6 +62,26 @@ Building releases from this repo: `./make_release.sh <version>` builds the Mac a
 
 Until you pick one, it's **Automatic**: Hindi or Urdu audio is written as Hinglish, anything else in its own script. Your pick is remembered. Changing it after a draft needs a new transcription. In lyrics mode, Hinglish works as before: paste Roman-script lyrics and choose **Hinglish** in the Language dropdown.
 
+## Corrections — teach it your words
+
+Every time you approve a transcript, the app compares Whisper's draft with what you approved, word by word on each line, and adds each fix to **`corrections.md`** (in the Mac app: `~/Library/Application Support/SRT Generator/corrections.md`; in a checkout or the Windows folder: next to `app.py`). Then, in every tab:
+
+- **Every new draft is corrected for you.** Words and short phrases from your corrections (for the draft's script — Hinglish, Hindi (Devanagari), Urdu, English, …) are replaced as whole words, keeping capitals ("Adti" → "Aditi", "KABI" → "KABHI"). The draft says how many, e.g. *"12 words auto-corrected from your corrections file"*, and highlights them; hover one to see what Whisper wrote and **Undo** it if it's wrong. An undone fix isn't counted again.
+- **Whisper is given hints.** The most frequent correct words are passed to Whisper as *hotwords* with every 30-second window (kept under Whisper's 223-token prompt limit), so it hears them right more often.
+- **What gets learnt:** replacements of up to four words. Respellings are learnt word by word (`adti` → `Aditi`); a run Whisper split differently stays a phrase (`bichadhja i` → `bichhad jaaye`), so no rule like `i` → `jaaye` is ever made. Fixing the same word again raises **Times seen**; fixing it to something different keeps the newest and notes the old one. Each job folder keeps Whisper's draft (`transcript-draft.txt`), the auto-corrected draft, the approved text and the diff (`corrections-diff.md` / `.json`).
+
+The file is plain Markdown that you can also edit in any text editor — one table per script:
+
+```markdown
+## Hinglish
+| Wrong | Correct | Times seen | Last seen | Notes |
+|---|---|---|---|---|
+| adti | Aditi | 5 | 2026-11-02 | |
+| ~~main~~ | mein | 2 | 2026-11-01 | struck through = switched off |
+```
+
+The **Corrections** tab (next to Song / Drama / Reels) shows them all in a searchable table: edit, switch off or delete any row, or add one by hand. **Upload .md** (or drop files on the tab) merges teammates' files into yours: bad rows are listed with their line numbers and the file isn't merged; when two files fix the same wrong word differently you pick one (the one seen more often is preselected). **Download corrections.md** saves the merged file to share. **Reset** clears it after saving a backup in `corrections-backups/` (merges back up the old file too).
+
 Every job is also saved in the `jobs/` folder (the input audio, or just the sound of a video, plus vocals, the draft, the approved text, SRT, cue data and log). In the Mac app that's `~/Library/Application Support/SRT Generator/jobs/` (in Finder: Go → Go to Folder…). Delete old job folders whenever you like.
 
 From the command line:

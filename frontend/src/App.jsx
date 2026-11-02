@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import Workspace from "./Workspace.jsx";
+import Corrections from "./Corrections.jsx";
 import Footer from "./Footer.jsx";
 
 /* The three sections. Presets come from /api/meta (config.SECTIONS); these are the fallback
@@ -9,6 +10,7 @@ const SECTION_TABS = [
   { code: "drama", name: "Drama", hint: "Dialogue over music & effects", format: "horizontal", isolate: "on" },
   { code: "reels", name: "Reels / YouTube", hint: "Speech · short, punchy captions", format: "vertical", isolate: "auto" },
 ];
+const CORRECTIONS_TAB = { code: "corrections", name: "Corrections", hint: "Your fixes for Whisper · shareable" };
 
 function useTheme() {
   const [theme, setTheme] = useState(() => localStorage.getItem("srt-theme") || "light");
@@ -40,7 +42,7 @@ export default function App() {
   const [section, setSectionState] = useState(() => {
     try {
       const saved = localStorage.getItem("srt-section");
-      return SECTION_TABS.some(t => t.code === saved) ? saved : "song";
+      return [...SECTION_TABS, CORRECTIONS_TAB].some(t => t.code === saved) ? saved : "song";
     } catch { return "song"; }
   });
 
@@ -85,7 +87,7 @@ export default function App() {
       </header>
 
       <nav className="sectiontabs" role="tablist" aria-label="Section">
-        {tabs.map(t => (
+        {[...tabs, CORRECTIONS_TAB].map(t => (
           <button key={t.code} role="tab" aria-selected={section === t.code}
             className={`sectiontab${section === t.code ? " on" : ""}`} onClick={() => setSection(t.code)}>
             <b>{t.name}</b>
@@ -97,6 +99,7 @@ export default function App() {
       {tabs.map(t => (
         <Workspace key={t.code} section={t.code} preset={t} meta={meta} active={section === t.code} />
       ))}
+      <Corrections active={section === "corrections"} />
 
       <Footer version={meta?.version || ""} />
     </div>
