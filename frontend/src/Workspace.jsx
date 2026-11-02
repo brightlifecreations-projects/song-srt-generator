@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import Waveform from "./Waveform.jsx";
 import VideoPreview from "./VideoPreview.jsx";
+import DraftEditor, { liveMarks } from "./DraftEditor.jsx";
 
 /* Step titles come from the server per flow (job.steps); this maps them to the
    live label shown while the step runs. */
@@ -315,6 +316,8 @@ export default function Workspace({ section, preset, meta, active }) {
   const [phase, setPhase] = useState("idle");
   const [job, setJob] = useState(null); // server state object (+ id)
   const [draft, setDraft] = useState(null); // transcribe mode: {language, note, script, approximate}
+  // Words replaced from the corrections file: [{id, line, start, original, replacement}]
+  const [marks, setMarks] = useState([]);
   const [playTime, setPlayTime] = useState(0);
 
   const playerRef = useRef(null);
@@ -341,6 +344,7 @@ export default function Workspace({ section, preset, meta, active }) {
     setPhase("idle");
     setJob(null);
     setDraft(null);
+    setMarks([]);
   }
 
   function setMode(m) {
@@ -412,12 +416,16 @@ export default function Workspace({ section, preset, meta, active }) {
     if (!file || working) return;
     setJob(null);
     setDraft(null);
+    setMarks([]);
     submit("/api/transcribe", { ...fileFields(), language, script: scriptPick }, s => {
       if (s.status !== "draft") { setPhase(s.status); return; }
       setLyrics(s.draft_text || "");
+      setMarks((s.auto_corrections || []).map((h, i) => ({ ...h, id: `m${i}` })));
       setDraft({
         language: s.detected_language_name, note: s.script_note, script: s.script,
         approximate: s.approximate_timing, pickedWith: scriptPick,
+        corrected: (s.auto_corrections || []).length, table: s.corrections_table,
+        hotwords: s.hotwords,
       });
       setPhase("draft");
     });
@@ -441,6 +449,13 @@ export default function Workspace({ section, preset, meta, active }) {
     setFile(f || null);
     setVideoPlayable(null);
     if (transcribing) setLyrics("");
+  }
+
+  /** Put a replaced word back the way Whisper wrote it. */
+  function undoMark(mark) {
+    const live = liveMarks(lyrics, marks).find(m => m.id === mark.id);
+    if (live) setLyrics(lyrics.slice(0, live.at.from) + mark.original + lyrics.slice(live.at.to));
+    setMarks(ms => ms.filter(m => m.id !== mark.id));
   }
 
   async function loadTxt(f) {
@@ -570,14 +585,23 @@ export default function Workspace({ section, preset, meta, active }) {
                 wrong words, then approve. One line = one subtitle (long lines are split to fit).
               </p>
             )}
+            {transcribing && hasDraft && draft.corrected > 0 && (
+              <p className="autofix-note" data-testid="autofix-count">
+                <b>{draft.corrected} {draft.corrected === 1 ? "word" : "words"} auto-corrected</b> from your
+                corrections file ({draft.table}). They're highlighted — hover one to see what Whisper
+                wrote, and undo it if it's wrong.
+                {liveMarks(lyrics, marks).length !== draft.corrected &&
+                  ` ${liveMarks(lyrics, marks).length} still in the text.`}
+              </p>
+            )}
             {transcribing && hasDraft && draft.note && <div className="warnbox draft-note">{draft.note}</div>}
-            <textarea
-              className="lyrics"
+            <DraftEditor
               value={lyrics}
+              onChange={setLyrics}
+              marks={transcribing && hasDraft ? marks : []}
+              onUndo={undoMark}
               placeholder={transcribing ? DRAFT_PLACEHOLDER : LYRICS_PLACEHOLDER[section]}
-              onChange={e => setLyrics(e.target.value)}
               readOnly={transcribing && !hasDraft}
-              spellCheck={false}
             />
             {!transcribing && (
               <label className="check">
@@ -737,6 +761,14 @@ export default function Workspace({ section, preset, meta, active }) {
 
                 {transcribing && (
                   <p className="stage-note">Spotted a wrong word? Fix it on the left and approve again — it reuses this job's audio.</p>
+                )}
+                {transcribing && job.corrections_recorded && (
+                  <p className="stage-note learned-note" data-testid="learned">
+                    {job.corrections_recorded.length
+                      ? <>Added to your corrections file: {job.corrections_recorded.map(c => `${c.wrong} → ${c.correct}`).join(", ")}.
+                        Next time Whisper writes these, they're fixed automatically.</>
+                      : "No new fixes for your corrections file in this approval."}
+                  </p>
                 )}
 
                 <div className="cuecard">

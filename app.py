@@ -27,10 +27,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import config
+import corrections
 from pipeline import (ACCEPTED_EXTENSIONS, AUTO_LANGUAGE, DATA_DIR, DEFAULT_SCRIPT,
                       SCRIPT_CODES, PipelineError, align_and_write, clean_isolate, clean_section,
-                      flow_steps, is_video, make_reporter, preprocess_lyrics, run_transcription,
-                      start_job)
+                      flow_steps, is_video, make_reporter, preprocess_lyrics, record_approval,
+                      run_transcription, start_job)
 
 ROOT = Path(__file__).parent
 DIST = ROOT / "frontend" / "dist"
@@ -115,6 +116,8 @@ def _run_job(job: dict):
         srt_name=result["srt_path"].name, job_dir=result["job_dir"].name,
         cues=result["cues"], timings=result["timings"], warnings=result["warnings"],
     )
+    if job["task"] == "align":  # an approved transcript: learn its fixes
+        job["corrections_recorded"] = record_approval(ctx, job["lyrics_text"])
 
 
 def _worker():
@@ -334,7 +337,8 @@ PUBLIC_KEYS = ("status", "stage", "steps", "message", "mode", "section", "isolat
                "music_detected", "srt_name",
                "job_dir", "cues", "timings", "warnings", "audio_ready", "draft_text",
                "detected_language", "detected_language_name", "script", "approximate_timing",
-               "script_note")
+               "script_note", "auto_corrections", "corrections_table", "hotwords",
+               "corrections_recorded")
 
 
 @app.get("/api/jobs/{job_id}")
@@ -389,6 +393,120 @@ def job_preview(job_id: str):
     if not path:
         return JSONResponse({"error": "not ready"}, status_code=404)
     return FileResponse(path, media_type="video/mp4")
+
+
+# ---------------------------------------------------------------------------
+# Corrections (corrections.md in the data folder, DECISIONS V4.1)
+
+def _corrections_state(tables: dict | None = None):
+    try:
+        tables = corrections.load(DATA_DIR) if tables is None else tables
+    except corrections.CorrectionsError as e:
+        return JSONResponse({"error": "Your corrections.md has errors.", "errors": e.errors,
+                             "path": str(corrections.path(DATA_DIR))}, status_code=422)
+    backups = sorted((DATA_DIR / corrections.BACKUP_DIR).glob("*.md")) \
+        if (DATA_DIR / corrections.BACKUP_DIR).is_dir() else []
+    return {"tables": [{"name": name, "rows": [{"key": k, **r} for k, r in rows.items()]}
+                       for name, rows in sorted(tables.items()) if rows],
+            "path": str(corrections.path(DATA_DIR)), "backups": len(backups),
+            "suggested_tables": sorted(set(corrections.SCRIPT_TABLES.values()))}
+
+
+def _tables_from_json(payload: dict) -> dict:
+    """The UI's table list → {table: {key: row}}, validated the same way as a file."""
+    lines = []
+    for t in payload.get("tables", []):
+        lines.append(f"## {t['name']}")
+        for r in t.get("rows", []):
+            wrong = corrections._cell(r.get("wrong", "")).strip()
+            lines.append(f"| {'~~' + wrong + '~~' if r.get('disabled') else wrong} "
+                         f"| {corrections._cell(r.get('correct', ''))} | {r.get('count', '')} "
+                         f"| {r.get('last_seen', '')} | {corrections._cell(r.get('notes', ''))} |")
+    return corrections.parse("\n".join(lines), "your edits")
+
+
+@app.get("/api/corrections")
+def corrections_get():
+    return _corrections_state()
+
+
+@app.put("/api/corrections")
+async def corrections_put(request: Request):
+    """Save the table after edits in the app (edit, delete, disable, add)."""
+    try:
+        tables = _tables_from_json(await request.json())
+    except corrections.CorrectionsError as e:
+        return JSONResponse({"error": "Some rows aren't valid.", "errors": e.errors}, status_code=422)
+    with corrections._lock:
+        corrections.save(DATA_DIR, tables)
+    return _corrections_state(tables)
+
+
+async def _read_uploads(files: list[UploadFile]):
+    """Parse uploaded .md files. Returns ([(name, tables)], {name: [errors]})."""
+    parsed, errors = [], {}
+    for f in files:
+        name = Path(f.filename or "upload.md").name
+        if not name.lower().endswith(".md"):
+            errors[name] = [f"{name}: not a .md file"]
+            continue
+        raw = await f.read()
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            errors[name] = [f"{name}: not a UTF-8 text file"]
+            continue
+        try:
+            tables = corrections.parse(text, name)
+        except corrections.CorrectionsError as e:
+            errors[name] = e.errors
+            continue
+        if not any(tables.values()):
+            errors[name] = [f"{name}: no corrections found (expected '## Script' headings with "
+                            "| Wrong | Correct | Times seen | Last seen | rows)"]
+            continue
+        parsed.append((name, tables))
+    return parsed, errors
+
+
+@app.post("/api/corrections/upload")
+async def corrections_upload(files: list[UploadFile] = File(...),
+                             choices: str = Form(""), apply: bool = Form(False)):
+    """Check uploaded corrections files against mine. apply=false: return the merge plan
+    (rows added, conflicts with the default choice); apply=true: merge with `choices`
+    ({"<table>\\t<key>": option index}, JSON) and save. Files with errors are never merged."""
+    parsed, errors = await _read_uploads(files)
+    try:
+        mine = corrections.load(DATA_DIR)
+    except corrections.CorrectionsError as e:
+        return JSONResponse({"error": "Your own corrections.md has errors; fix them first.",
+                             "errors": e.errors}, status_code=422)
+    plan = corrections.merge_plan(mine, parsed)
+    result = {"files": [n for n, _ in parsed], "errors": errors, "added": plan["added"],
+              "same": plan["same"],
+              "conflicts": [{**c, "id": f"{c['table']}\t{c['key']}"} for c in plan["conflicts"]]}
+    if apply and parsed:
+        with corrections._lock:
+            merged = corrections.merge(mine, parsed, json.loads(choices) if choices else {})
+            corrections.backup(DATA_DIR)
+            corrections.save(DATA_DIR, merged)
+        result["merged"] = True
+        result["state"] = _corrections_state(merged)
+    return result
+
+
+@app.get("/api/corrections/download")
+def corrections_download():
+    p = corrections.path(DATA_DIR)
+    if not p.exists():
+        corrections.save(DATA_DIR, {})
+    return FileResponse(p, media_type="text/markdown", filename="corrections.md")
+
+
+@app.post("/api/corrections/reset")
+def corrections_reset():
+    saved = corrections.reset(DATA_DIR)
+    return {"backup": str(saved) if saved else None, "state": _corrections_state({})}
 
 
 app.mount("/", StaticFiles(directory=str(DIST), html=True), name="frontend")

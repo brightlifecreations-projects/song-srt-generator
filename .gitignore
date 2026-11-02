@@ -12,3 +12,5 @@ release-assets/
 bin/
 .python/
 .uv-cache/
+corrections.md
+corrections-backups/
