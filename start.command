@@ -1,5 +1,5 @@
 #!/bin/bash
-# Start the Song SRT Generator. Run Install.command once first.
+# Start the SRT Generator. Run Install.command once first.
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 export PATH="$DIR/bin:$PATH"
@@ -11,6 +11,6 @@ if [ ! -x ".venv/bin/python" ]; then
   exit 1
 fi
 
-echo "Starting Song SRT Generator — your browser will open in a moment."
+echo "Starting SRT Generator — your browser will open in a moment."
 echo "Keep this window open while you use the app. Close it to stop."
 exec .venv/bin/python app.py

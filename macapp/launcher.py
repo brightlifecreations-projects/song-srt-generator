@@ -1,7 +1,7 @@
-"""Song SRT Generator — macOS app shell (Contents/Resources/launcher.py).
+"""SRT Generator — macOS app shell (Contents/Resources/launcher.py).
 
 Started by Contents/MacOS/launcher with SRT_APP_DIR (the read-only app code inside
-the bundle) and SRT_DATA_DIR (~/Library/Application Support/Song SRT Generator).
+the bundle) and SRT_DATA_DIR (~/Library/Application Support/SRT Generator).
 
 1. One instance only: a second launch brings the running window forward and exits.
 2. First launch, or the first launch after an update: install the pinned packages
@@ -9,6 +9,7 @@ the bundle) and SRT_DATA_DIR (~/Library/Application Support/Song SRT Generator).
    data folder, so updates never download them again.
 3. Run the FastAPI server on a thread and load the UI into the same native window.
    Closing the window quits the app, which stops the server.
+4. Start Sparkle (updater.py): a daily update check and "Check for Updates…" in the app menu.
 """
 
 import fcntl
@@ -29,12 +30,14 @@ import webview
 APP_DIR = Path(os.environ["SRT_APP_DIR"])
 SUPPORT = Path(os.environ["SRT_DATA_DIR"])
 RESOURCES = Path(__file__).parent
+APP_BUNDLE = RESOURCES.parent.parent  # …/SRT Generator.app
 STAMP = SUPPORT / "installed.json"
 LOG = SUPPORT / "install.log"
 UV = str(SUPPORT / "bin" / "uv")
 
 sys.path.insert(0, str(APP_DIR))
 import config  # noqa: E402
+from pipeline import ACCEPTED_EXTENSIONS  # noqa: E402
 
 VERSION = (APP_DIR / "VERSION").read_text(encoding="utf-8").strip()
 LOCAL_HOST = "127.0.0.1" if config.HOST in ("0.0.0.0", "") else config.HOST
@@ -66,6 +69,72 @@ def claim_single_instance():
     lock.write(str(os.getpid()))
     lock.flush()
     return lock
+
+
+def log_line(message: str):
+    with LOG.open("a", encoding="utf-8") as log:
+        log.write(f"=== {time.ctime()}  {message}\n")
+
+
+def trash_old_app():
+    """After the 3.x data folder was moved (see Contents/MacOS/launcher), move the old
+    "Song SRT Generator.app" to the Trash: opening it would set everything up again
+    in its old folder and download the models a second time."""
+    marker = SUPPORT / "migrated-from-3x"
+    if not marker.exists():
+        return
+    from Foundation import NSFileManager, NSURL
+
+    for folder in (Path("/Applications"), Path.home() / "Applications"):
+        old = folder / "Song SRT Generator.app"
+        if old.exists():
+            ok, _, error = NSFileManager.defaultManager().trashItemAtURL_resultingItemURL_error_(
+                NSURL.fileURLWithPath_(str(old)), None, None)
+            log_line(f"moved {old} to the Trash" if ok else f"couldn't trash {old}: {error}")
+    marker.unlink()
+
+
+def picker_filter(mime_types: list[str]):
+    """The web page's file-input MIME types → a pywebview file filter, [(description, [extensions])].
+
+    pywebview turns WebKit's MIME types into UTTypes and drops the ones macOS doesn't know,
+    so MKV (and M4V) files couldn't be picked; matching by extension accepts every format
+    the pipeline reads. Returns None for anything else (pywebview's own handling)."""
+    if any(m.startswith(("audio/", "video/")) for m in mime_types):
+        return [("Audio or video", sorted(ext.lstrip(".") for ext in ACCEPTED_EXTENSIONS))]
+    if mime_types and all(m.startswith("text/") for m in mime_types):
+        return [("Text", ["txt"])]
+    return None
+
+
+def patch_file_picker():
+    from webview.platforms import cocoa
+
+    original = cocoa.BrowserView.create_file_dialog
+
+    def create_file_dialog(self, dialog_type, directory, allow_multiple, save_filename,
+                           file_filter, main_thread=False):
+        if isinstance(file_filter, cocoa.Foundation.NSArray):
+            file_filter = picker_filter([str(m) for m in file_filter]) or file_filter
+        return original(self, dialog_type, directory, allow_multiple, save_filename,
+                        file_filter, main_thread)
+
+    cocoa.BrowserView.create_file_dialog = create_file_dialog
+
+
+def start_updater():
+    """Sparkle must start on the main thread, once the native menu bar exists."""
+    from PyObjCTools import AppHelper
+
+    import updater
+
+    def run():
+        try:
+            updater.start(APP_BUNDLE, log_line)
+        except Exception as e:  # never let the updater stop the app
+            log_line(f"Sparkle: failed to start: {e!r}")
+
+    AppHelper.callAfter(run)
 
 
 def requirements_hash() -> str:
@@ -104,6 +173,7 @@ class Shell:
         self.window = None
         self.proc = None
         self.server = None
+        self.updater_started = False
 
     def ui(self, fn, *args):
         self.window.evaluate_js(f"{fn}({', '.join(json.dumps(a) for a in args)})")
@@ -132,7 +202,7 @@ class Shell:
 
     def setup(self) -> bool:
         first = not STAMP.exists()
-        self.ui("begin", "Setting up Song SRT Generator" if first else f"Updating to version {VERSION}", first)
+        self.ui("begin", "Setting up SRT Generator" if first else f"Updating to version {VERSION}", first)
 
         bundled_models = RESOURCES / "models"  # only in --full builds
         if bundled_models.is_dir() and not (SUPPORT / "models").exists():
@@ -176,6 +246,9 @@ class Shell:
         return self.fail("The app's local server didn't start. Click Try again.")
 
     def run(self):
+        if not self.updater_started:
+            self.updater_started = True
+            start_updater()
         self.ui("reset")
         if needs_setup() and not self.setup():
             return
@@ -195,10 +268,12 @@ class Shell:
 def main():
     SUPPORT.mkdir(parents=True, exist_ok=True)
     lock = claim_single_instance()  # noqa: F841 — held open until exit
+    trash_old_app()
+    patch_file_picker()
     shell = Shell()
     webview.settings["ALLOW_DOWNLOADS"] = True
     shell.window = webview.create_window(
-        "Song SRT Generator", html=(RESOURCES / "progress.html").read_text(encoding="utf-8"),
+        "SRT Generator", html=(RESOURCES / "progress.html").read_text(encoding="utf-8"),
         js_api=Api(shell), width=1280, height=880, min_size=(920, 640), background_color="#f5f6f9",
     )
     # Persistent storage keeps the theme and language picks between launches.

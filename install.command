@@ -1,5 +1,5 @@
 #!/bin/bash
-# Song SRT Generator — one-time installer for Apple Silicon Macs.
+# SRT Generator — one-time installer for Apple Silicon Macs.
 # Everything installs INSIDE this folder. Nothing on your Mac is touched.
 # Needs internet once (Python runtime + AI models). Safe to re-run anytime.
 
@@ -19,7 +19,7 @@ trap say_fail ERR
 set -e
 
 echo ""
-echo "  Song SRT Generator — installing"
+echo "  SRT Generator — installing"
 echo "  Everything stays inside this folder. Nothing else on your Mac is touched."
 echo ""
 

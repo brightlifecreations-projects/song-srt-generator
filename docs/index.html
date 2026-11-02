@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Song SRT Generator — perfectly timed subtitles for AI songs</title>
+<title>SRT Generator — perfectly timed subtitles for songs, dramas and reels</title>
 <meta name="description" content="A free, local Mac & Windows app that turns a song plus its exact lyrics into perfectly timed SRT subtitles. No transcription, no cloud, no accounts.">
 <link rel="icon" type="image/png" href="assets/favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -124,7 +124,7 @@ footer{border-top:1px solid var(--line-strong);padding:30px 0 40px;display:flex;
 <nav>
   <a class="brand" href="#">
     <svg width="26" height="26" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#3a4ee8"/><g fill="#f4f6ff"><rect x="7" y="13" width="2.6" height="6" rx="1.3"/><rect x="11.4" y="9" width="2.6" height="14" rx="1.3"/><rect x="15.8" y="5" width="2.6" height="22" rx="1.3"/><rect x="20.2" y="10" width="2.6" height="12" rx="1.3"/><rect x="24.6" y="14" width="2.6" height="4" rx="1.3"/></g></svg>
-    Song SRT Generator
+    SRT Generator
   </a>
   <div class="nav-links">
     <a href="#how">How it works</a>
@@ -136,14 +136,14 @@ footer{border-top:1px solid var(--line-strong);padding:30px 0 40px;display:flex;
 
 <header class="hero">
   <span class="kicker">Free · Local · Mac + Windows</span>
-  <h1>Your lyrics, snapped to the vocal. <em>Perfectly.</em></h1>
-  <p>Song SRT Generator turns an AI-generated song plus its exact lyrics into a precisely timed SRT subtitle file. It never transcribes — so it never gets a word wrong.</p>
+  <h1>Your words, snapped to the voice. <em>Perfectly.</em></h1>
+  <p>SRT Generator turns a song, a drama scene, a reel or a YouTube video into a precisely timed SRT subtitle file. Bring the exact lyrics or script — or let it transcribe a draft that you correct and approve. Either way, every subtitle matches text a person signed off on.</p>
   <div class="hero-ctas">
     <a class="btn" href="#download">Download for free</a>
     <a class="btn ghost" href="#how">See how it works</a>
   </div>
   <span class="hero-note">No accounts · No uploads · No telemetry · Works offline</span>
-  <div class="shot"><img src="assets/site-light.png" alt="Song SRT Generator app — waveform, subtitle preview and download" loading="eager"></div>
+  <div class="shot"><img src="assets/site-light.png" alt="SRT Generator app — a reel previewed with its subtitles on the video" loading="eager"></div>
 </header>
 
 <section id="how" class="hr">
@@ -153,7 +153,7 @@ footer{border-top:1px solid var(--line-strong);padding:30px 0 40px;display:flex;
     <p>Online tools transcribe sung vocals and get them wrong — instruments bleed in, choruses loop, words hallucinate. This app takes the lyrics you already have and force-aligns them to the singing. Every subtitle matches a lyric line exactly as written.</p>
   </div>
   <div class="steps">
-    <div class="step"><span class="n">STEP 01</span><h3>Isolate the vocals</h3><p>An AI model strips the instrumental away, leaving a clean vocal track — on Apple Silicon it runs on the GPU in seconds. You get the isolated vocal stem as a free bonus download.</p></div>
+    <div class="step"><span class="n">STEP 01</span><h3>Isolate the voice</h3><p>An AI model strips the music and effects away, leaving a clean vocal or dialogue track — on Apple Silicon it runs on the GPU in seconds. For reels it only kicks in when there's background music. You get the isolated stem as a free bonus download.</p></div>
     <div class="step"><span class="n">STEP 02</span><h3>Align your lyrics</h3><p>Every word you pasted is matched to the exact moment it's sung, with word-level timestamps. Your line breaks are respected — one written line becomes one subtitle.</p></div>
     <div class="step"><span class="n">STEP 03</span><h3>Build the SRT</h3><p>Single-line cues, capped for your format, no overlaps, imports cleanly into CapCut, Premiere and YouTube. Click any cue in the preview to hear that moment in the song.</p></div>
   </div>
@@ -165,11 +165,13 @@ footer{border-top:1px solid var(--line-strong);padding:30px 0 40px;display:flex;
     <h2>Built for people who ship reels, not settings panels.</h2>
   </div>
   <div class="grid">
+    <div class="card"><h3><span class="dot"></span>Song · Drama · Reels</h3><p>Three tabs, each tuned for its audio: lyric phrases for songs, dialogue cues of 7 seconds at most that break at every pause for drama, short punchy four-word captions for reels and YouTube. Each tab remembers its own settings.</p></div>
+    <div class="card"><h3><span class="dot"></span>See it on the video</h3><p>Drop in an MP4, MOV, M4V, MKV or WEBM and the preview plays your video with the subtitles drawn on it — click any cue to jump there.</p></div>
     <div class="card"><h3><span class="dot"></span>Made for vertical</h3><p>Pick 9:16 (Reels / TikTok) or 16:9 (YouTube) and every subtitle stays a single line under the right length cap — 25 characters vertical, 42 horizontal. Never two lines on a phone screen.</p></div>
     <div class="card"><h3><span class="dot"></span>Punctuation is the edit</h3><p>A comma or full stop in your lyric sheet always starts a new subtitle. Punctuate the way the song breathes, and the captions follow the music.</p></div>
     <div class="card"><h3><span class="dot"></span>Word-level timing</h3><p>Cues appear a beat before the vocal lands (karaoke-style), and every split lands on the exact word boundary — not arithmetic.</p></div>
     <div class="card"><h3><span class="dot"></span>Private by design</h3><p>Everything runs on your machine. Songs never leave your computer, nothing is uploaded, there's no account and no telemetry. After setup, it works with Wi-Fi off.</p></div>
-    <div class="card"><h3><span class="dot"></span>Installs itself</h3><p>The zip carries its own Python, its own ffmpeg, its own AI models — nothing to pre-install, nothing global touched. Delete the folder and it's fully gone.</p></div>
+    <div class="card"><h3><span class="dot"></span>Installs and updates itself</h3><p>The app brings its own Python, ffmpeg and AI models — nothing to pre-install, nothing global touched. On Mac, new versions install themselves (signed and verified) and your models are never downloaded twice.</p></div>
     <div class="card"><h3><span class="dot"></span>Waiting is entertainment</h3><p>While it works, the status line runs a rotating set of jokes written for editors and AI people — with rare easter eggs for the observant. <span class="mono">No two runs repeat.</span></p></div>
   </div>
 </section>
@@ -179,7 +181,7 @@ footer{border-top:1px solid var(--line-strong);padding:30px 0 40px;display:flex;
     <span class="kicker">Dark mode</span>
     <h2>Studio at night.</h2>
     <p>One click in the corner. A warm midnight console, not an inverted afterthought.</p>
-    <div class="shot"><img src="assets/site-dark.png" alt="Song SRT Generator in dark mode"></div>
+    <div class="shot"><img src="assets/site-dark.png" alt="SRT Generator in dark mode"></div>
     <p class="leakline">i hear this song even after you close the app. especially then.</p>
   </div>
 </section>
@@ -195,6 +197,8 @@ footer{border-top:1px solid var(--line-strong);padding:30px 0 40px;display:flex;
     <div class="tl"><span class="v">v2</span><h3>Format-aware subtitles</h3><p>Single-line cues with hard caps per format, punctuation-first splitting from word-level timestamps, and the vertical/horizontal toggle.</p></div>
     <div class="tl"><span class="v">v3</span><h3>The interface</h3><p>A complete React rebuild: live waveform, one processing card with rotating quips, click-to-seek subtitle preview, light and dark themes.</p></div>
     <div class="tl"><span class="v">v3.2</span><h3>Anyone can install it</h3><p>Self-contained zips for Mac and Windows that bring their own Python, ffmpeg and models. Unzip, run one file, wait for PASS.</p></div>
+    <div class="tl"><span class="v">v3.8</span><h3>Transcribe for me</h3><p>Whisper drafts the words, you correct and approve them, and only the approved text is timed. Video input, and Hinglish written in everyday Roman letters.</p></div>
+    <div class="tl"><span class="v">v4.0</span><h3>SRT Generator</h3><p>A new name and three sections — Song, Drama, Reels / YouTube — a video preview with the subtitles on it, and automatic updates on Mac.</p></div>
   </div>
 </section>
 
@@ -202,38 +206,38 @@ footer{border-top:1px solid var(--line-strong);padding:30px 0 40px;display:flex;
   <div class="sec-head">
     <span class="kicker">Download</span>
     <h2>Free. Two files, one PASS.</h2>
-    <p>First install downloads the AI models (~2 GB) and takes 5–30 minutes. After that, everything is instant and offline.</p>
+    <p>First install downloads the AI models (~2 GB) and takes 5–30 minutes. After that, everything works offline.</p>
   </div>
   <div class="dl-grid">
     <div class="dl-card">
       <h3>macOS</h3>
       <span class="mono">Apple Silicon (M1–M4) · ~80 MB zip</span>
       <ol>
-        <li>Unzip anywhere</li>
-        <li>Open Terminal, type <b>bash&nbsp;</b>, drag <b>Install.command</b> in, press Enter</li>
-        <li>Wait for <b>PASS</b>, then double-click <b>Start.command</b></li>
+        <li>Download <b>SRT-Generator-…-mac.zip</b>, unzip, drag <b>SRT Generator</b> into Applications</li>
+        <li>Open it → <b>Done</b>, then System Settings → Privacy &amp; Security → <b>Open Anyway</b> (once)</li>
+        <li>Wait for setup to pass. Updates install themselves from then on</li>
       </ol>
-      <a class="btn" href="https://github.com/brightlifecreations/song-srt-generator/releases/latest/download/Song-SRT-Generator-mac.zip" data-dl="mac">Download for Mac</a>
+      <a class="btn" href="https://github.com/brightlifecreations-projects/song-srt-generator/releases/latest" data-dl="mac">Download for Mac</a>
     </div>
     <div class="dl-card">
       <h3>Windows</h3>
       <span class="mono">64-bit Intel/AMD · ~100 MB zip</span>
       <ol>
-        <li>Unzip to your Desktop</li>
+        <li>Download <b>SRT-Generator-…-win-lite.zip</b>, unzip to your Desktop</li>
         <li>Double-click <b>Install.bat</b> → "More info" → "Run anyway"</li>
         <li>Wait for <b>PASS</b>, then double-click <b>Start.bat</b></li>
       </ol>
-      <a class="btn" href="https://github.com/brightlifecreations/song-srt-generator/releases/latest/download/Song-SRT-Generator-windows.zip" data-dl="win">Download for Windows</a>
+      <a class="btn" href="https://github.com/brightlifecreations-projects/song-srt-generator/releases/latest" data-dl="win">Download for Windows</a>
     </div>
   </div>
-  <div class="privacy"><b>The privacy promise:</b> your songs are processed entirely on your own computer. This website has no analytics, the app phones nowhere, and the source code is public so you can check both claims.</div>
+  <div class="privacy"><b>The privacy promise:</b> your files are processed entirely on your own computer. This website has no analytics, the app's only network request is the update check (no data sent), and the source code is public so you can check both claims.</div>
 </section>
 
 <footer>
   <span class="f-meta">Free &amp; open · Bright Life Creations</span>
   <!-- PROTECTED ATTRIBUTION — owner mandate, do not remove (see repo DECISIONS.md) -->
   <span class="attribution">Made by Aman using Claude</span>
-  <span class="f-meta"><a href="https://github.com/brightlifecreations/song-srt-generator" style="color:inherit">Source on GitHub</a></span>
+  <span class="f-meta"><a href="https://github.com/brightlifecreations-projects/song-srt-generator" style="color:inherit">Source on GitHub</a></span>
 </footer>
 
 </div>

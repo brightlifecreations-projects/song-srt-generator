@@ -18,12 +18,14 @@ def fail(message: str) -> int:
 
 
 def main() -> int:
-    print("Song SRT Generator — first-run verification\n")
+    print("SRT Generator — first-run verification\n")
 
     if sys.version_info[:2] not in ((3, 10), (3, 11)):
         return fail(f"Python 3.10 or 3.11 required, running {sys.version.split()[0]}.")
-    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-        return fail("ffmpeg/ffprobe not found on PATH. Install ffmpeg first (see README).")
+    from pipeline import FFMPEG, FFPROBE  # the bundled copies in bin/ if present, else PATH
+
+    if not shutil.which(FFMPEG) or not shutil.which(FFPROBE):
+        return fail("ffmpeg/ffprobe not found (bin/ or PATH). Install ffmpeg first (see README).")
     print("OK  Python and ffmpeg present")
 
     clip = ROOT / "sample" / "clip.wav"
@@ -42,7 +44,7 @@ def main() -> int:
 
     try:
         result = run_pipeline(
-            clip, lyrics.read_text(encoding="utf-8"),
+            clip, lyrics.read_text(encoding="utf-8"), section="song",
             progress_callback=lambda s, t, m: print(f"  [{s}/{t}] {m}"),
         )
     except PipelineError as e:

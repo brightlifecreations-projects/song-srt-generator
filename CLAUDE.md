@@ -1,8 +1,8 @@
-# Song SRT Generator — setup and run guide
+# SRT Generator — setup and run guide
 
 You are the installer and operator of this app. Set it up on this machine, verify it, then run it.
 
-This app turns a song or speech (audio or video) into a timestamped SRT by forced alignment. Lyrics mode aligns the user's pasted lyrics/script and never transcribes; Transcribe mode has Whisper draft the text, the user corrects and approves it, and only the approved text is aligned (DECISIONS.md V3.8). Pipeline: audio → vocal isolation (songs) → align text to the vocal stem → SRT. Fully offline after one-time model downloads.
+This app turns a song, drama dialogue or speech (audio or video) into a timestamped SRT by forced alignment. Three sections — Song, Drama, Reels/YouTube (`config.SECTIONS`) — set the voice-isolation default and the cue rules (DECISIONS.md V4.0). Lyrics mode aligns the user's pasted lyrics/script and never transcribes; Transcribe mode has Whisper draft the text, the user corrects and approves it, and only the approved text is aligned (DECISIONS.md V3.8). Pipeline: audio (extracted from video with the bundled ffmpeg) → voice isolation (on, off, or auto when music is detected) → align text → SRT. Fully offline after one-time model downloads.
 
 ## 1. Preflight
 
@@ -24,7 +24,7 @@ The scripted way (preferred): run `bash install.command` — zero prerequisites 
 - **Apple Silicon Mac:** `pip install -r requirements.txt` (pinned; includes the MLX GPU separation engine). Keep `SEPARATOR_ENGINE = "mlx"` in config.py.
 - **Windows x64 (untested on real hardware):** the scripted way is `install.bat` (bundled `bin\uv.exe` + ffmpeg; build the zip with `./make_release.sh <ver> --windows`). Manual: `pip install -r requirements-windows.txt` (unpinned, uses the `audio-separator` CPU engine) and set `SEPARATOR_ENGINE = "cpu"` in config.py (the Windows release zip does this for you). See DECISIONS.md V3.2.
 - **Intel Mac:** not supported. `install.command` refuses non-arm64 Macs and there is no Intel build.
-- **Collaborators don't use this guide:** they install "Song SRT Generator.app" from GitHub Releases (built by `./make_release.sh <ver>` from `macapp/`; see DECISIONS.md V3.6). Its data lives in `~/Library/Application Support/Song SRT Generator/`, not in this folder. `VERSION` is the single source of the version number.
+- **Collaborators don't use this guide:** they install "SRT Generator.app" from GitHub Releases (built by `./make_release.sh <ver>` from `macapp/`; see DECISIONS.md V3.6 and V4.0) and get updates through Sparkle. Its data lives in `~/Library/Application Support/SRT Generator/` (3.x's `Song SRT Generator/` folder is moved there on first launch), not in this folder. `VERSION` is the single source of the version number. Never commit Sparkle's private EdDSA key; it lives only in the release machine's Keychain.
 
 ## 4. First-run verification
 
