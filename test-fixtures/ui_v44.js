@@ -35,7 +35,10 @@ const edit = page().querySelector("select[aria-label='Edit provider']");
 setVal(edit, "custom"); await sleep(300);
 const form = () => page().querySelector("[data-testid=provider-form]");
 setVal(form().querySelector("input[aria-label='Base URL']"), MOCK);
-setVal(form().querySelector("input[aria-label=Model]"), "mock-model");
+// v4.4.1+: the Model field is a dropdown; pick "Custom model id…" and type the id
+form().querySelector("button[aria-label=Model]").click(); await sleep(300);
+[...form().querySelectorAll(".modelpick-list button")].find(b => b.textContent.startsWith("Custom model id")).click(); await sleep(200);
+setVal(form().querySelector("input[aria-label='Custom model id']"), "mock-model");
 form().querySelector("[data-testid=ai-save]").click(); await sleep(800);
 log("after saving Custom:", form().querySelector(".ai-status")?.textContent, "| saved list:", page().querySelector("[data-testid=saved-keys]").innerText.replace(/\n/g, " | "));
 // a dummy key for OpenRouter: masked, show/hide, save, remove
@@ -80,11 +83,11 @@ const more = ws().querySelector("[data-testid=more-options]");
 log("More options open?", more.open, "| contents:", more.innerText.replace(/\n/g, " | ").slice(0, 160));
 $$("button.go", ws())[0].click();
 await until(() => ws().querySelector(".results") || ws().querySelector(".errbox"), 300000, "song result");
-log("song result:", ws().querySelector(".doneline")?.textContent, "| cues:", $$(".cue", ws()).length, "| waveform:", !!ws().querySelector(".wavecard canvas, .wavecard wave, .wavecard [part]") || !!ws().querySelector(".wavecard"));
+log("song result:", ws().querySelector(".doneline")?.textContent, "| cues:", $$("[data-testid=rcue]", ws()).length, "| waveform:", !!ws().querySelector(".wavecard canvas, .wavecard wave, .wavecard [part]") || !!ws().querySelector(".wavecard"));
 const srtLink = ws().querySelector(".dl-primary");
 let srt = await (await fetch(srtLink.getAttribute("href"))).text();
 log("SRT download:", srt.split("\n").slice(0, 3).join(" / "), "| vocals link:", !!ws().querySelector(".dl-secondary"));
-const vox = await fetch(ws().querySelector(".dl-secondary").getAttribute("href"));
+const vox = await fetch($$(".dl-secondary", ws()).find(a => a.textContent.includes("Isolated")).getAttribute("href"));
 log("vocals download:", vox.status, vox.headers.get("content-type"));
 
 // ---------------------------------------------------------------- Drama: transcribe → auto-polish → edit → approve (video)
@@ -107,10 +110,10 @@ const darea = ws().querySelector("textarea.lyrics");
 setVal(darea, darea.value.replace("[boss?]", "boss"));
 $$("button.go", ws())[0].click();
 await until(() => ws().querySelector(".results") || ws().querySelector(".errbox"), 300000, "drama result");
-log("drama result:", ws().querySelector(".doneline")?.textContent, "| cues:", $$(".cue", ws()).length, "| subtitle overlay:", !!ws().querySelector(".video-sub"));
+log("drama result:", ws().querySelector(".doneline")?.textContent, "| cues:", $$("[data-testid=rcue]", ws()).length, "| subtitle overlay:", !!ws().querySelector(".video-sub"));
 srt = await (await fetch(ws().querySelector(".dl-primary").getAttribute("href"))).text();
 log("drama SRT:", srt.split("\n").slice(0, 3).join(" / "));
-$$(".cue", ws())[2].click(); await sleep(500);
+$$("[data-testid=rcue]", ws())[2].click(); await sleep(500);
 log("cue click seeks video to:", ws().querySelector("video").currentTime.toFixed(2), "| overlay text:", ws().querySelector(".video-sub")?.textContent);
 
 // ---------------------------------------------------------------- Reels: auto-polish off → manual Polish; then AI off
@@ -129,7 +132,7 @@ await until(() => !ws().querySelector(".proc"), 120000, "polish end"); await sle
 log("after Polish — AI marks:", $$(".drafteditor-back mark[data-kind^=ai]", ws()).length, "|", ws().querySelector("[data-testid=ai-count]")?.textContent.slice(0, 40), "| button now:", ws().querySelector("[data-testid=polish-again]")?.textContent);
 $$("button.go", ws())[0].click();
 await until(() => ws().querySelector(".results") || ws().querySelector(".errbox"), 300000, "reels result");
-log("reels result:", ws().querySelector(".doneline")?.textContent, "| cues:", $$(".cue", ws()).length);
+log("reels result:", ws().querySelector(".doneline")?.textContent, "| cues:", $$("[data-testid=rcue]", ws()).length);
 await fetch("/api/ai", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: false, auto: true }) });
 await navTo("Song"); await navTo("Reels / YouTube");
 log("AI off — sidebar:", document.querySelector("[data-testid=ai-status]").textContent, "| Polish button:", !!ws().querySelector("[data-testid=polish-again]"));

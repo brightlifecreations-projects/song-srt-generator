@@ -310,6 +310,60 @@ Recorded 2026-07-15 from Aman's answers.
 
 - The AI & API keys page's Model field is a dropdown filled from each provider's own model list with the saved key (Anthropic `models.list`, `{base_url}/models` for OpenAI and Custom, Gemini `models.list`, OpenRouter `/api/v1/models`). It shows display names with the API id in small text, newest first, with OpenAI and Gemini filtered to chat/text models. Lists are cached per provider, with a refresh button. If a list can't load, a short built-in list appears, plus "Custom model id…". A saved model that isn't listed stays selected as "(saved)". A stored label-like name (spaces or capitals, and not in the list) is replaced by the first listed model. Shipped with a build check only, per Aman.
 
+## V4.5 — Review panel, Updates page, stale UI fixed (2026-11-03)
+
+- **Stale UI after updates (seen on two Macs, including a collaborator's fresh 4.4.1).** The window is a WKWebView loading the app's own page from 127.0.0.1, and WebKit kept serving the previous version's cached page. Three fixes:
+  - **Headers:** the server sends `Cache-Control: no-store` for the page and every `/api/*` response; only hashed build assets (`/assets/name-HASH.*`) get `public, max-age=31536000, immutable`.
+  - **Cache clearing:** on launch, when `VERSION` differs from `last-run-version` in the data folder, the launcher clears WebKit's default data store disk, memory, fetch and offline caches before loading the page, keeping localStorage (theme, last page, settings). It logs "web cache cleared after update A -> B".
+  - **Versioned URL:** the page is loaded as `/?v=<version>`, so a stale entry can't match.
+  `/api/meta` gains `page_loads` (the last few page requests with their `v=`): a page served from the cache never reaches the server, so it shows which UI the window really loaded.
+- **Old app:** once (`old-app-offered`), if "Song SRT Generator.app" is in /Applications, ~/Applications or ~/Downloads (or a folder unzipped there), a native confirmation offers to move it to the Trash.
+- **Updates page** (sidebar item with a dot when an update is available, `Updates.jsx`): current version, last checked, a big **Check for updates** button, an automatic-check switch and an automatic download-and-install switch.
+  - **Mac:** `macapp/updater.py` now gives SPUUpdater its own **user driver** written in Python, in place of SPUStandardUserDriver. pyobjc calls Sparkle's reply blocks fine; a probe confirmed this before the rewrite. The driver records Sparkle's progress into a status the server reads (`app.update_backend`):
+    - **Check:** a user-initiated `checkForUpdates`. "You're up to date (x)", or the new version's appcast notes with **Update now**.
+    - **Update now:** answers Sparkle's pending reply with *install*, then answers *install* again when it's ready, so it downloads, verifies, installs and relaunches through Sparkle with no Sparkle windows.
+    - **Background and scheduled updates:** a delegate catches updates Sparkle downloaded silently (`willInstallUpdateOnQuit` → Update now installs at once). A scheduled check that finds an update lights the dot instead of opening a window.
+    - **Switches:** Sparkle's own `automaticallyChecksForUpdates` / `automaticallyDownloadsUpdates`.
+    - **Menu:** "Check for Updates…" checks and opens the page.
+    All Sparkle calls run on the main thread. **The Objective-C classes are defined only after Sparkle.framework is loaded.** The first 4.5 candidate defined them at import, before the `SPUUserDriver` protocol existed. That killed the launcher's startup thread, and the app froze on its setup screen; the stale-UI test caught it before release. The launcher also now survives any updater failure.
+  - **Windows and checkouts:** the latest GitHub release (`/api/updates`). It checks automatically once per launch (switch saved in `update-settings.json`); if newer, it shows the release notes and **Download update** opens the release page. The download-and-install switch is shown disabled ("Mac only"). The old *Update available* banner is gone; the dot replaces it.
+- **Review panel** (`Review.jsx`, `reviewFix.js`, `review.py`). After any SRT is made (all three pages, lyrics and transcribe), the right column shows:
+  - **Player:** the video, or the waveform with the current subtitle under it, plus play/pause, a scrubber and the time.
+  - **Cue list:** number, start/end and text. The playing cue is highlighted and scrolled into view. Click a cue to jump to it; **Loop this cue**.
+  - **Editing:**
+    - inline text (Enter, or double-click)
+    - Start/End ±0.1 s, and set from the playhead
+    - Split at the cursor (time shared by text position), Merge next, Delete, and **+ Cue at playhead**
+    - Undo/redo with 100 steps (⌘Z / ⇧⌘Z)
+    - keys: Space play/pause, ↑/↓ between cues, Enter edit, Esc stop editing
+  - **Checks:** overlaps, cues under 0.3 s and lines over the 25/42 cap. **Fix automatically** works in an order that never reorders text: it pulls back overlaps, splits long lines within their own time, then lengthens short cues to 0.3 s, nudging the following cues later only where needed. An earlier version split first and scrambled the order of the words; it was rewritten and checked on that case with Node.
+  - **Re-time line:** that cue's audio (widened 0.75 s, bounded by its neighbours) is cut and re-aligned to the current text with the same aligner. It's queued on the job worker, so it never runs the model alongside a job.
+  - **Saving:** edits autosave (`PUT /api/jobs/{id}/cues`) to `edited.srt` + `edited-cues.json` in the job folder. Generation also writes `original.srt` (and clears old edits). **Download SRT** gives the edited file with an *Edited* badge; **Download original** (`?original=1`) gives the generated one. Edits stay when you switch pages, and the last job per page is remembered and restored (with the job's audio) after a reload.
+  - **Learning:** changed words go into corrections.md as **User** fixes, once each, in the job's table (the draft's, or the table for the lyrics language). The generated words and the edited words are compared as one run, so splits, merges and moved lines learn nothing. The first version compared cue by cue and learnt "it's → it" from a split; that was found in testing and fixed.
+- **Verified 2026-11-03:**
+  - **Stale UI, the real path:** 4.4.1 reinstalled and run (its page cached by WebKit). Then a local appcast offered the 4.5 build, signed with the release key, through a temporary `SUFeedURL` override. 4.4.1's daily check downloaded it silently; quitting with Cmd+Q installed it; on reopening, setup passed, the launcher logged the cache clear, and the server saw the page requested as `v=4.5` at once — no manual steps.
+  - **Updates page in the installed app:**
+    - **Live feed:** "up to date" (4.5 newer than the published 4.4.1), last-checked time updated.
+    - **Switches:** they write Sparkle's own setting (`SUAutomaticallyUpdate` 0 → 1).
+    - **Simulated 4.5.1:** a throwaway build from a scratch worktree, served from a local appcast. **Check** showed "available 4.5.1" with its notes; **Update now** went downloading → preparing; the app quit, Sparkle installed 4.5.1 and relaunched it by itself, and the relaunched window loaded `v=4.5.1`.
+    - **Cleanup:** every test override was removed afterwards (`SUFeedURL` deleted, `SUAutomaticallyUpdate` restored, worktree, build and feed server deleted).
+  - **Review panel** (WKWebView, `test-fixtures/ui_v45.js`):
+    - **Audio:** edit, nudge, split at the cursor, merge, undo/redo, ↓ and Space, loop (the playhead returned into the looped cue), add and delete a cue, the overlap/long/short warnings and Fix automatically (no issues left), and Re-time line after changing a cue's words (start moved 13.2 → 13.5 s).
+    - **Downloads:** the edited SRT is valid and contains the edits; the original is unchanged.
+    - **Learning and persistence:** only "it's → it is [User]" was learnt; edits were still there after switching pages, and the server had them.
+    - **Video:** the overlay followed the cues and the edited cue appears in the list.
+    - **Layout:** a long Review panel had squashed the player to its title bar (sticky flex column); fixed with `flex-shrink: 0`, seen in the screenshots.
+  - **Regression:**
+    - 8-case API matrix all passing (song lyrics → 106 cues, first at 9.78 s)
+    - v4.4 UI suite passing, updated for 4.4.1's model dropdown and 4.5's review rows: all pages, Corrections, AI & API keys, 20 layout checks clean
+    - warmup PASS, 18 unit tests
+  - **Old app:** detection was checked with a fake home folder (found both a direct copy and one inside an unzipped release folder).
+  - **Not verified:**
+    - the old-app dialog itself (it needs a click)
+    - Windows (Updates page, GitHub path)
+    - another Mac (the collaborator's)
+    - the "update available" state's screenshot (the screenshots come from a checkout, which shows the GitHub path)
+
 ## Hard rules (per brief, as amended by Aman)
 
 No Docker, no databases, no Electron, no cloud calls at runtime (owner-approved exceptions: the V3.6 GitHub update check, now Windows/checkouts only, and Sparkle's daily appcast check on Mac, V4.0, and the one-time Hinglish model download, V4.2; plus the opt-in AI polish, V4.3, which sends transcript text only to a provider the user picks and pays for, and is off until a key is added), no paid APIs (except that opt-in), no accounts, no telemetry. App must run without any coding agent present. (The brief's original "Python + Gradio only, no React" rule was lifted by Aman for V3.)

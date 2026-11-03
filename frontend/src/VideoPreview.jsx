@@ -12,7 +12,7 @@ function fmt(t) {
     onPlayable(false) and plays fallbackSrc, the server's preview copy, once that exists.
     Exposes seekTo(seconds) via ref, like Waveform. */
 const VideoPreview = forwardRef(function VideoPreview(
-  { file, fallbackSrc, cues, format, onTime, onPlayable, processing }, ref) {
+  { file, fallbackSrc, cues, format, onTime, onPlayable, processing, onDuration, onPlaying }, ref) {
   const videoRef = useRef(null);
   const [fileUrl, setFileUrl] = useState(null);
   const [playable, setPlayable] = useState(null);
@@ -42,6 +42,13 @@ const VideoPreview = forwardRef(function VideoPreview(
       v.currentTime = Math.max(0, Math.min(seconds, v.duration));
       v.play();
     },
+    seek(seconds) {
+      const v = videoRef.current;
+      if (v && v.duration) v.currentTime = Math.max(0, Math.min(seconds, v.duration));
+    },
+    play() { videoRef.current?.play(); },
+    pause() { videoRef.current?.pause(); },
+    toggle() { const v = videoRef.current; if (v) (v.paused ? v.play() : v.pause()); },
   }));
 
   return (
@@ -61,10 +68,13 @@ const VideoPreview = forwardRef(function VideoPreview(
             preload="metadata"
             onLoadedMetadata={e => {
               setDuration(e.currentTarget.duration);
+              onDuration?.(e.currentTarget.duration);
               // Audio-only decoding (an unsupported video codec) reports a 0×0 picture.
               if (src === fileUrl) report(e.currentTarget.videoWidth > 0);
             }}
             onError={() => { if (src === fileUrl) report(false); }}
+            onPlay={() => onPlaying?.(true)}
+            onPause={() => onPlaying?.(false)}
             onTimeUpdate={e => { const t = e.currentTarget.currentTime; setTime(t); onTime?.(t); }}
             onSeeked={e => { const t = e.currentTarget.currentTime; setTime(t); onTime?.(t); }}
           />

@@ -10,7 +10,11 @@ the bundle) and SRT_DATA_DIR (~/Library/Application Support/SRT Generator).
    Hinglish model download (V4.2); otherwise it downloads the first time Hinglish is used.
 3. Run the FastAPI server on a thread and load the UI into the same native window.
    Closing the window quits the app, which stops the server.
-4. Start Sparkle (updater.py): a daily update check and "Check for Updates…" in the app menu.
+4. Start Sparkle (updater.py): a daily update check and "Check for Updates…" in the app menu;
+   the app's Updates page drives it (V4.5).
+5. After an update (VERSION differs from the last run), clear the web view's disk and memory
+   cache before loading the page, so the new version's UI shows at once (V4.5). localStorage
+   (theme, last page, settings) is kept. Then, once, offer to trash an old "Song SRT Generator.app".
 """
 
 import fcntl
@@ -42,7 +46,10 @@ from pipeline import ACCEPTED_EXTENSIONS  # noqa: E402
 
 VERSION = (APP_DIR / "VERSION").read_text(encoding="utf-8").strip()
 LOCAL_HOST = "127.0.0.1" if config.HOST in ("0.0.0.0", "") else config.HOST
-URL = f"http://{LOCAL_HOST}:{config.PORT}"
+URL = f"http://{LOCAL_HOST}:{config.PORT}/?v={VERSION}"  # a new version never matches a cached page
+LAST_RUN = SUPPORT / "last-run-version"
+OLD_APP_OFFERED = SUPPORT / "old-app-offered"
+_updates = {}  # the Sparkle backend, once started
 
 
 def claim_single_instance():
@@ -123,7 +130,7 @@ def patch_file_picker():
     cocoa.BrowserView.create_file_dialog = create_file_dialog
 
 
-def start_updater():
+def start_updater(open_updates_page):
     """Sparkle must start on the main thread, once the native menu bar exists."""
     from PyObjCTools import AppHelper
 
@@ -131,11 +138,50 @@ def start_updater():
 
     def run():
         try:
-            updater.start(APP_BUNDLE, log_line)
+            backend = updater.start(APP_BUNDLE, log_line, on_check=open_updates_page)
         except Exception as e:  # never let the updater stop the app
             log_line(f"Sparkle: failed to start: {e!r}")
+            return
+        _updates["backend"] = backend
+        if "app" in sys.modules:  # the server is already running
+            sys.modules["app"].update_backend = backend
 
     AppHelper.callAfter(run)
+
+
+def clear_web_cache_if_updated():
+    """A new version: drop WebKit's cached pages and files (disk, memory, fetch cache) so the old
+    UI can't come back. Keeps localStorage and everything else. Runs before the page loads."""
+    last = LAST_RUN.read_text(encoding="utf-8").strip() if LAST_RUN.exists() else ""
+    if last == VERSION:
+        return
+    from Foundation import NSDate, NSSet
+    from PyObjCTools import AppHelper
+    import WebKit
+
+    types = [t for t in ("WKWebsiteDataTypeDiskCache", "WKWebsiteDataTypeMemoryCache",
+                         "WKWebsiteDataTypeFetchCache", "WKWebsiteDataTypeOfflineWebApplicationCache")
+             if hasattr(WebKit, t)]
+    done = threading.Event()
+
+    def run():
+        WebKit.WKWebsiteDataStore.defaultDataStore().removeDataOfTypes_modifiedSince_completionHandler_(
+            NSSet.setWithArray_([getattr(WebKit, t) for t in types]), NSDate.distantPast(), lambda: done.set())
+    AppHelper.callAfter(run)
+    cleared = done.wait(10)
+    log_line(f"web cache {'cleared' if cleared else 'NOT cleared (timeout)'} after update "
+             f"{last or '(first run)'} -> {VERSION}: {', '.join(types)}")
+    LAST_RUN.write_text(VERSION, encoding="utf-8")
+
+
+def old_apps() -> list[Path]:
+    """Copies of the 3.x "Song SRT Generator.app" left in Applications or Downloads."""
+    found = []
+    for folder in (Path("/Applications"), Path.home() / "Applications", Path.home() / "Downloads"):
+        found += [p for p in (folder / "Song SRT Generator.app",) if p.exists()]
+        if folder.name == "Downloads" and folder.is_dir():
+            found += [p for p in folder.glob("*/Song SRT Generator.app")]
+    return found
 
 
 def requirements_hash() -> str:
@@ -266,6 +312,7 @@ class Shell:
         import app as server
 
         server.on_focus_request = self.focus
+        server.update_backend = _updates.get("backend")
         self.server = uvicorn.Server(uvicorn.Config(server.app, host=config.HOST, port=config.PORT,
                                                     log_level="warning"))
         threading.Thread(target=self.server.run, daemon=True).start()
@@ -278,13 +325,42 @@ class Shell:
     def run(self):
         if not self.updater_started:
             self.updater_started = True
-            start_updater()
+            try:
+                start_updater(self.open_updates_page)
+            except Exception as e:  # updates must never stop the app from opening
+                log_line(f"Sparkle: couldn't start: {e!r}")
         self.ui("reset")
         if needs_setup() and not self.setup():
             return
         if self.server is None and not self.start_server():
             return
+        clear_web_cache_if_updated()
         self.window.load_url(URL)
+        self.offer_to_trash_old_app()
+
+    def open_updates_page(self):
+        threading.Thread(target=lambda: self.window.evaluate_js(
+            "window.__openPage && window.__openPage('updates')"), daemon=True).start()
+
+    def offer_to_trash_old_app(self):
+        """Once: an old "Song SRT Generator.app" is still around — offer to move it to the Trash."""
+        found = old_apps()
+        if OLD_APP_OFFERED.exists() or not found:
+            return
+        OLD_APP_OFFERED.write_text(VERSION, encoding="utf-8")
+        where = "\n".join(str(p) for p in found)
+        if not self.window.create_confirmation_dialog(
+                "Old app found",
+                f"The old “Song SRT Generator” app is still on this Mac:\n\n{where}\n\n"
+                "Opening it would set up a second copy and download its models again. "
+                "Move it to the Trash?"):
+            log_line("old app kept: " + where.replace("\n", ", "))
+            return
+        from Foundation import NSFileManager, NSURL
+        for old in found:
+            ok, _, error = NSFileManager.defaultManager().trashItemAtURL_resultingItemURL_error_(
+                NSURL.fileURLWithPath_(str(old)), None, None)
+            log_line(f"moved {old} to the Trash" if ok else f"couldn't trash {old}: {error}")
 
     def focus(self):
         from AppKit import NSApp

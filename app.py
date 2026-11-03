@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 
 import ai_polish
 import config
+import review
 import corrections
 import hinglish_model
 from pipeline import (ACCEPTED_EXTENSIONS, AUTO_LANGUAGE, DATA_DIR, DEFAULT_SCRIPT, QUALITIES,
@@ -97,6 +98,13 @@ def _run_job(job: dict):
         job.update(status="draft", message="Draft ready", timings=dict(ctx["timings"]),
                    warnings=list(ctx["warnings"]), job_dir=ctx["job_dir"].name, **draft)
         return
+    if job["task"] == "retime":  # Review panel: one cue re-aligned to its audio
+        try:
+            job["retime_result"] = review.retime(ctx, **job["retime_request"])
+        except PipelineError as e:
+            job["retime_result"] = {"error": str(e)}
+        job.update(status="done", message="Done")
+        return
     if job["task"] == "polish":  # "Polish again": the text in the draft box, as it is now
         polished = run_polish(ctx, job["polish_text"], job["ai"], report)
         job.update(status="draft", message="Draft ready", draft_text=polished["draft_text"],
@@ -112,6 +120,8 @@ def _run_job(job: dict):
         stem_path=str(result["stem_path"]) if result["stem_path"] else None,
         srt_name=result["srt_path"].name, job_dir=result["job_dir"].name,
         cues=result["cues"], timings=result["timings"], warnings=result["warnings"],
+        original_srt_path=str(result["original_srt_path"]), edited_srt_path=None, edited_cues=None,
+        video_format=job.get("video_format"), max_chars=result["max_chars"],
     )
     if job["task"] == "align":  # an approved transcript: learn its fixes
         job["corrections_recorded"] = record_approval(ctx, job["lyrics_text"])
@@ -138,6 +148,23 @@ def _worker():
 
 
 threading.Thread(target=_worker, daemon=True).start()
+
+
+page_loads: list[str] = []  # each time the window asked for the page (query, e.g. "v=4.5")
+
+
+@app.middleware("http")
+async def cache_headers(request: Request, call_next):
+    """Never cache the page or the API (V4.5: an update must show its own UI at once); hashed
+    build assets (/assets/name-HASH.js) can be cached for good, their names change every build."""
+    response = await call_next(request)
+    if request.url.path == "/":
+        page_loads.append(request.url.query or "")
+    if request.url.path.startswith("/assets/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    else:
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.middleware("http")
@@ -169,6 +196,7 @@ def meta():
         "max_minutes_hard": config.MAX_MINUTES_HARD,
         "strip_tags_default": config.STRIP_TAGS_DEFAULT,
         "version": VERSION,
+        "page_loads": page_loads[-5:],  # a stale cached page never reaches the server (V4.5)
     }
 
 
@@ -176,31 +204,79 @@ def _version_tuple(text: str):
     return tuple(int(n) for n in re.findall(r"\d+", text))
 
 
-_update_cache: dict = {}
+# ---------------------------------------------------------------------------
+# Updates page (V4.5). The Mac app sets update_backend to its Sparkle bridge (macapp/updater.py);
+# Windows and checkouts ask GitHub for the latest release instead.
+
+update_backend = None
+UPDATE_SETTINGS = DATA_DIR / "update-settings.json"
+_github = {"status": "idle", "available": None, "error": None, "last_checked": None}
 
 
-@app.get("/api/update")
-def update_check():
-    """Compare VERSION with the latest GitHub release. Any failure (offline, rate limit) = no banner."""
-    if "result" in _update_cache:
-        return _update_cache["result"]
-    result = {"available": False}
-    # The Mac app updates itself with Sparkle (V4.0); the banner is for Windows and checkouts.
-    if config.CHECK_FOR_UPDATES and VERSION != "dev" and sys.platform != "darwin":
-        try:
-            req = urllib.request.Request(
-                f"https://api.github.com/repos/{config.UPDATE_REPO}/releases/latest",
-                headers={"Accept": "application/vnd.github+json", "User-Agent": "srt-generator"},
-            )
-            with urllib.request.urlopen(req, timeout=4) as r:
-                release = json.load(r)
-            latest = release["tag_name"].lstrip("vV")
-            if _version_tuple(latest) > _version_tuple(VERSION):
-                result = {"available": True, "latest": latest, "url": release["html_url"]}
-        except Exception:
-            return result  # don't cache failures: a later page load may be online
-    _update_cache["result"] = result
-    return result
+def _update_settings() -> dict:
+    try:
+        saved = json.loads(UPDATE_SETTINGS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        saved = {}
+    return {"auto_check": saved.get("auto_check", config.CHECK_FOR_UPDATES) is not False}
+
+
+def _github_check():
+    _github.update(status="checking", error=None)
+    try:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{config.UPDATE_REPO}/releases/latest",
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "srt-generator"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            release = json.load(r)
+        latest = release["tag_name"].lstrip("vV")
+        newer = VERSION != "dev" and _version_tuple(latest) > _version_tuple(VERSION)
+        _github.update(status="available" if newer else "uptodate",
+                       available={"version": latest, "notes": release.get("body") or "",
+                                  "url": release["html_url"]} if newer else None)
+    except Exception:
+        _github.update(status="error", error="Couldn't reach GitHub — check the internet connection.")
+    _github["last_checked"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+@app.get("/api/updates")
+def updates_state():
+    if update_backend is not None:
+        return {"version": VERSION, "mode": "sparkle", **update_backend.state()}
+    settings = _update_settings()
+    if settings["auto_check"] and _github["last_checked"] is None:
+        _github_check()  # once per app run
+    return {"version": VERSION, "mode": "github", "auto_check": settings["auto_check"],
+            "auto_install": None, **_github}
+
+
+@app.post("/api/updates/check")
+def updates_check():
+    if update_backend is not None:
+        update_backend.check()
+    else:
+        _github_check()
+    return updates_state()
+
+
+@app.post("/api/updates/install")
+def updates_install():
+    """Mac: download, install and relaunch through Sparkle. (Windows opens the release page itself.)"""
+    if update_backend is None:
+        return JSONResponse({"error": "Updates install from the release page on this computer."},
+                            status_code=400)
+    update_backend.install()
+    return updates_state()
+
+
+@app.put("/api/updates/settings")
+async def updates_settings(request: Request):
+    body = await request.json()
+    if update_backend is not None:
+        update_backend.set_automatic(body.get("auto_check"), body.get("auto_install"))
+    elif "auto_check" in body:
+        UPDATE_SETTINGS.write_text(json.dumps({"auto_check": bool(body["auto_check"])}), encoding="utf-8")
+    return updates_state()
 
 
 @app.post("/api/focus")
@@ -365,7 +441,8 @@ PUBLIC_KEYS = ("status", "stage", "steps", "message", "progress", "mode", "secti
                "detected_language", "detected_language_name", "script", "approximate_timing",
                "script_note", "auto_corrections", "corrections_table", "hotwords",
                "corrections_recorded", "review_marks", "engine", "quality", "topic_words",
-               "offline_draft", "ai_marks", "ai_message", "ai_provider", "polish_run")
+               "offline_draft", "ai_marks", "ai_message", "ai_provider", "polish_run",
+               "edited_cues", "video_format", "max_chars", "retime_result")
 
 
 @app.get("/api/jobs/{job_id}")
@@ -376,6 +453,7 @@ def job_state(job_id: str):
     state = {k: job[k] for k in PUBLIC_KEYS if k in job}
     ctx = job.get("ctx", {})
     state["has_vocals"] = bool(ctx.get("vocals_path"))
+    state["edited"] = bool(job.get("edited_srt_path"))
     state["has_preview"] = bool(ctx.get("preview_path"))
     return state
 
@@ -388,9 +466,49 @@ def _job_file(job_id: str, key: str, media_type: str, filename: str):
 
 
 @app.get("/api/jobs/{job_id}/srt")
-def download_srt(job_id: str):
-    return _job_file(job_id, "srt_path", "application/x-subrip",
-                     JOBS.get(job_id, {}).get("srt_name", "subtitles.srt"))
+def download_srt(job_id: str, original: bool = False):
+    """The SRT: the edited one when the Review panel changed it (V4.5), else as generated;
+    original=1 always gives the generated one (original.srt)."""
+    job = JOBS.get(job_id, {})
+    name = job.get("srt_name", "subtitles.srt")
+    if original:
+        return _job_file(job_id, "original_srt_path", "application/x-subrip",
+                         name.replace(".srt", "-original.srt"))
+    if job.get("edited_srt_path"):
+        return _job_file(job_id, "edited_srt_path", "application/x-subrip", name)
+    return _job_file(job_id, "srt_path", "application/x-subrip", name)
+
+
+@app.put("/api/jobs/{job_id}/cues")
+async def save_cues(job_id: str, request: Request):
+    """Review panel edits: write edited.srt (original.srt is kept) and learn text changes as
+    User fixes in corrections.md."""
+    job = JOBS.get(job_id)
+    if not job or job.get("status") != "done" or "ctx" not in job:
+        return JSONResponse({"error": "This job has expired. Generate the SRT again."}, status_code=409)
+    try:
+        cues = review.clean_cues((await request.json()).get("cues", []))
+    except (ValueError, TypeError, KeyError):
+        return JSONResponse({"error": "Those cues aren't valid."}, status_code=400)
+    saved = review.save_edits(job["ctx"], cues, job.get("cues") or [])
+    job.update(edited_srt_path=str(saved["path"]), edited_cues=cues,
+               review_recorded=saved["recorded_total"])
+    return {"edited": True, "recorded": saved["recorded"]}
+
+
+@app.post("/api/jobs/{job_id}/retime")
+async def retime_cue(job_id: str, request: Request):
+    """Re-align one cue's text to its stretch of audio (queued like any job phase)."""
+    job = JOBS.get(job_id)
+    if not job or job.get("status") != "done" or "ctx" not in job:
+        return JSONResponse({"error": "This job has expired. Generate the SRT again."}, status_code=409)
+    body = await request.json()
+    job.pop("finished", None)
+    job.update(task="retime", retime_request={k: body.get(k) for k in ("start", "end", "text", "low", "high")},
+               retime_result=None)
+    _work_queue.put(job_id)
+    job["status"] = "running"
+    return {"ok": True}
 
 
 @app.get("/api/jobs/{job_id}/vocals")

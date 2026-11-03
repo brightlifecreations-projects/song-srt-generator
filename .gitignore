@@ -20,3 +20,4 @@ test-fixtures/*-reference.txt
 test-fixtures/.work/
 ai-settings.json
 hinglish-spellings.md
+update-settings.json
