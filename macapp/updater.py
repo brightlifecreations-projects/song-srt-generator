@@ -61,108 +61,6 @@ def _item_info(item) -> dict:
             "notes_html": str(item.itemDescription() or "")}
 
 
-class AppDriver(NSObject, protocols=[objc.protocolNamed("SPUUserDriver")]):
-    """Sparkle's user driver, reporting to Status instead of showing windows."""
-
-    def initWithStatus_(self, status):
-        self = objc.super(AppDriver, self).init()
-        self.s = status
-        return self
-
-    def showUpdatePermissionRequest_reply_(self, request, reply):
-        reply(None)  # Info.plist already enables the daily check
-
-    def showUserInitiatedUpdateCheckWithCancellation_(self, cancel):
-        self.s.status, self.s.error = "checking", None
-
-    def showUpdateFoundWithAppcastItem_state_reply_(self, item, state, reply):
-        self.s.available, self.s.status, self.s.reply = _item_info(item), "available", reply
-        if self.s.install_requested:
-            self._install()
-
-    def showUpdateReleaseNotesWithDownloadData_(self, data):
-        pass
-
-    def showUpdateReleaseNotesFailedToDownloadWithError_(self, error):
-        pass
-
-    def showUpdateNotFoundWithError_acknowledgement_(self, error, ack):
-        self.s.status, self.s.available = "uptodate", None
-        ack()
-
-    def showUpdaterError_acknowledgement_(self, error, ack):
-        self.s.status, self.s.error = "error", str(error.localizedDescription())
-        self.s.install_requested = False
-        ack()
-
-    def showDownloadInitiatedWithCancellation_(self, cancel):
-        self.s.status, self.s.progress = "downloading", (0, 0)
-
-    def showDownloadDidReceiveExpectedContentLength_(self, length):
-        self.s.progress = (0, int(length))
-
-    def showDownloadDidReceiveDataOfLength_(self, length):
-        got, total = self.s.progress or (0, 0)
-        self.s.progress = (got + int(length), total)
-
-    def showDownloadDidStartExtractingUpdate(self):
-        self.s.status = "extracting"
-
-    def showExtractionReceivedProgress_(self, progress):
-        pass
-
-    def showReadyToInstallAndRelaunch_(self, reply):
-        if self.s.install_requested:
-            self.s.status = "installing"
-            reply(CHOICE_INSTALL)
-        else:
-            self.s.status, self.s.ready_reply = "ready", reply
-
-    def showInstallingUpdateWithApplicationTerminated_retryTerminatingApplication_(self, terminated, retry):
-        self.s.status = "installing"
-
-    def showUpdateInstalledAndRelaunched_acknowledgement_(self, relaunched, ack):
-        ack()
-
-    def showUpdateInFocus(self):
-        pass
-
-    def dismissUpdateInstallation(self):
-        if self.s.status in ("checking", "downloading", "extracting"):
-            self.s.status = "idle"
-        self.s.reply = None
-
-    def _install(self):
-        """Answer whichever reply Sparkle is waiting for with "install"."""
-        self.s.status = "downloading"
-        if self.s.ready_reply is not None:
-            reply, self.s.ready_reply = self.s.ready_reply, None
-            self.s.status = "installing"
-            reply(CHOICE_INSTALL)
-        elif self.s.reply is not None:
-            reply, self.s.reply = self.s.reply, None
-            reply(CHOICE_INSTALL)
-
-
-class UpdaterDelegate(NSObject):
-    """Updates Sparkle downloaded silently (automatic download on) install on quit; this offers
-    "Update now" for them too."""
-
-    def initWithStatus_(self, status):
-        self = objc.super(UpdaterDelegate, self).init()
-        self.s = status
-        return self
-
-    def updater_didFindValidUpdate_(self, updater, item):
-        if self.s.available is None:
-            self.s.available = _item_info(item)
-            self.s.status = "available"
-
-    def updater_willInstallUpdateOnQuit_immediateInstallationBlock_(self, updater, item, install_now):
-        self.s.available, self.s.status, self.s.install_now = _item_info(item), "available", install_now
-        return True
-
-
 class Backend:
     """The server's handle on Sparkle (app.update_backend)."""
 
@@ -213,17 +111,129 @@ class Backend:
         _on_main(run)
 
 
-class SRTUpdateMenuTarget(NSObject):
-    """Target of the "Check for Updates…" menu item: check, and show the Updates page."""
+def _define_classes():
+    """The Objective-C classes, defined once and only after Sparkle.framework is loaded: AppDriver
+    adopts Sparkle's SPUUserDriver protocol, which doesn't exist in the process before that.
+    (Defining them at import time stopped the app on launch.)"""
+    if "classes" in _state:
+        return _state["classes"]
 
-    def checkForUpdates_(self, sender):
-        backend = _state["backend"]
-        backend.check()
-        if backend.on_check:
-            backend.on_check()
+    class AppDriver(NSObject, protocols=[objc.protocolNamed("SPUUserDriver")]):
+        """Sparkle's user driver, reporting to Status instead of showing windows."""
 
-    def validateMenuItem_(self, item):
-        return True
+        def initWithStatus_(self, status):
+            self = objc.super(AppDriver, self).init()
+            self.s = status
+            return self
+
+        def showUpdatePermissionRequest_reply_(self, request, reply):
+            reply(None)  # Info.plist already enables the daily check
+
+        def showUserInitiatedUpdateCheckWithCancellation_(self, cancel):
+            self.s.status, self.s.error = "checking", None
+
+        def showUpdateFoundWithAppcastItem_state_reply_(self, item, state, reply):
+            self.s.available, self.s.status, self.s.reply = _item_info(item), "available", reply
+            if self.s.install_requested:
+                self._install()
+
+        def showUpdateReleaseNotesWithDownloadData_(self, data):
+            pass
+
+        def showUpdateReleaseNotesFailedToDownloadWithError_(self, error):
+            pass
+
+        def showUpdateNotFoundWithError_acknowledgement_(self, error, ack):
+            self.s.status, self.s.available = "uptodate", None
+            ack()
+
+        def showUpdaterError_acknowledgement_(self, error, ack):
+            self.s.status, self.s.error = "error", str(error.localizedDescription())
+            self.s.install_requested = False
+            ack()
+
+        def showDownloadInitiatedWithCancellation_(self, cancel):
+            self.s.status, self.s.progress = "downloading", (0, 0)
+
+        def showDownloadDidReceiveExpectedContentLength_(self, length):
+            self.s.progress = (0, int(length))
+
+        def showDownloadDidReceiveDataOfLength_(self, length):
+            got, total = self.s.progress or (0, 0)
+            self.s.progress = (got + int(length), total)
+
+        def showDownloadDidStartExtractingUpdate(self):
+            self.s.status = "extracting"
+
+        def showExtractionReceivedProgress_(self, progress):
+            pass
+
+        def showReadyToInstallAndRelaunch_(self, reply):
+            if self.s.install_requested:
+                self.s.status = "installing"
+                reply(CHOICE_INSTALL)
+            else:
+                self.s.status, self.s.ready_reply = "ready", reply
+
+        def showInstallingUpdateWithApplicationTerminated_retryTerminatingApplication_(self, terminated, retry):
+            self.s.status = "installing"
+
+        def showUpdateInstalledAndRelaunched_acknowledgement_(self, relaunched, ack):
+            ack()
+
+        def showUpdateInFocus(self):
+            pass
+
+        def dismissUpdateInstallation(self):
+            if self.s.status in ("checking", "downloading", "extracting"):
+                self.s.status = "idle"
+            self.s.reply = None
+
+        def _install(self):
+            """Answer whichever reply Sparkle is waiting for with "install"."""
+            self.s.status = "downloading"
+            if self.s.ready_reply is not None:
+                reply, self.s.ready_reply = self.s.ready_reply, None
+                self.s.status = "installing"
+                reply(CHOICE_INSTALL)
+            elif self.s.reply is not None:
+                reply, self.s.reply = self.s.reply, None
+                reply(CHOICE_INSTALL)
+
+
+    class UpdaterDelegate(NSObject):
+        """Updates Sparkle downloaded silently (automatic download on) install on quit; this offers
+        "Update now" for them too."""
+
+        def initWithStatus_(self, status):
+            self = objc.super(UpdaterDelegate, self).init()
+            self.s = status
+            return self
+
+        def updater_didFindValidUpdate_(self, updater, item):
+            if self.s.available is None:
+                self.s.available = _item_info(item)
+                self.s.status = "available"
+
+        def updater_willInstallUpdateOnQuit_immediateInstallationBlock_(self, updater, item, install_now):
+            self.s.available, self.s.status, self.s.install_now = _item_info(item), "available", install_now
+            return True
+
+
+    class SRTUpdateMenuTarget(NSObject):
+        """Target of the "Check for Updates…" menu item: check, and show the Updates page."""
+
+        def checkForUpdates_(self, sender):
+            backend = _state["backend"]
+            backend.check()
+            if backend.on_check:
+                backend.on_check()
+
+        def validateMenuItem_(self, item):
+            return True
+
+    _state["classes"] = (AppDriver, UpdaterDelegate, SRTUpdateMenuTarget)
+    return _state["classes"]
 
 
 def start(app_path: Path, log=print, on_check=None):
@@ -235,6 +245,7 @@ def start(app_path: Path, log=print, on_check=None):
         return None
     sparkle = {}
     objc.loadBundle("Sparkle", sparkle, bundle_path=str(framework))
+    AppDriver, UpdaterDelegate, SRTUpdateMenuTarget = _define_classes()
     host = NSBundle.bundleWithPath_(str(app_path))
     status = Status()
     driver = AppDriver.alloc().initWithStatus_(status)

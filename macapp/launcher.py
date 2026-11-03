@@ -325,7 +325,10 @@ class Shell:
     def run(self):
         if not self.updater_started:
             self.updater_started = True
-            start_updater(self.open_updates_page)
+            try:
+                start_updater(self.open_updates_page)
+            except Exception as e:  # updates must never stop the app from opening
+                log_line(f"Sparkle: couldn't start: {e!r}")
         self.ui("reset")
         if needs_setup() and not self.setup():
             return
