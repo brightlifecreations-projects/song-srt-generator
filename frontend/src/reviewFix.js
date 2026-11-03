@@ -7,6 +7,9 @@ export const fmt = t => {
   return `${m}:${(t % 60).toFixed(1).padStart(4, "0")}`;
 };
 export const r3 = t => Math.round(t * 1000) / 1000;
+/** Shorter than MIN_CUE — to the millisecond, so a cue Fix automatically made 0.3 s long doesn't
+    read as 0.29999… (floating point) and stay flagged. */
+const tooShort = c => c.end - c.start < MIN_CUE - 0.0005;
 
 /** Everything that would look wrong on screen: overlaps, very short cues, over-long lines. */
 export function problems(cues, cap) {
@@ -14,7 +17,7 @@ export function problems(cues, cap) {
   cues.forEach((c, i) => {
     const next = cues[i + 1];
     if (next && c.end > next.start + 0.001) out.push({ i, kind: "overlap", text: `overlaps cue ${i + 2}` });
-    if (c.end - c.start < MIN_CUE) out.push({ i, kind: "short", text: `shorter than ${MIN_CUE} s` });
+    if (tooShort(c)) out.push({ i, kind: "short", text: `shorter than ${MIN_CUE} s` });
     if (cap && c.text.length > cap) out.push({ i, kind: "long", text: `${c.text.length} characters (max ${cap})` });
   });
   return out;
@@ -48,13 +51,13 @@ export function autoFix(cues, cap) {
     });
   }
   for (let i = 0; i < out.length; i++) {
-    if (out[i].end - out[i].start >= MIN_CUE) continue;
+    if (!tooShort(out[i])) continue;
     out[i].end = r3(out[i].start + MIN_CUE);
     for (let j = i + 1; j < out.length; j++) {
       const prev = out[j - 1], c = out[j];
       if (c.start >= prev.end + 0.01) break;
       c.start = r3(prev.end + 0.01);
-      if (c.end - c.start < MIN_CUE) c.end = r3(c.start + MIN_CUE);
+      if (tooShort(c)) c.end = r3(c.start + MIN_CUE);
     }
   }
   return out;
