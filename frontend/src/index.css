@@ -1018,3 +1018,30 @@ textarea.lyrics::placeholder { color: var(--muted); }
 .corr-table td input[type="checkbox"] { width: auto; accent-color: var(--accent); }
 .corr-del { background: none; border: none; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; text-decoration: underline; }
 .corr-del:hover { color: var(--leak); }
+
+/* ---------- model dropdown (V4.4.1) ---------- */
+.form-field { display: flex; flex-direction: column; gap: 6px; }
+.modelpick { position: relative; display: flex; flex-direction: column; gap: 4px; }
+.modelpick-row { display: flex; gap: 8px; }
+.modelpick-button {
+  flex: 1; min-width: 0; display: grid; grid-template-columns: 1fr auto; grid-template-rows: auto auto; align-items: center;
+  column-gap: 10px; text-align: left; font: inherit; font-size: 13.5px; padding: 7px 10px; color: var(--ink);
+  background: var(--paper); border: 1px solid var(--line-strong); border-radius: 8px; cursor: pointer;
+}
+.modelpick-button > span, .modelpick-button > small { grid-column: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modelpick-button > svg { grid-column: 2; grid-row: 1 / span 2; }
+.modelpick small, .modelpick-list small { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+.modelpick-list {
+  position: absolute; top: 100%; left: 0; right: 0; z-index: 20; margin-top: 4px; max-height: 320px; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: var(--shadow); padding: 4px;
+}
+.modelpick-list button {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%; padding: 7px 10px; border: none;
+  border-radius: 6px; background: none; font: inherit; font-size: 13.5px; color: var(--ink); text-align: left; cursor: pointer;
+}
+.modelpick-list button:hover, .modelpick-list button.on { background: var(--accent-soft); }
+.modelpick-filter, .modelpick-custom {
+  font: inherit; font-size: 13px; padding: 7px 10px; width: 100%; color: var(--ink); background: var(--paper);
+  border: 1px solid var(--line-strong); border-radius: 8px;
+}
+.modelpick-filter { margin-bottom: 4px; }

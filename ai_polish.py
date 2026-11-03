@@ -340,6 +340,105 @@ def adapter_for(settings: dict) -> Adapter:
 
 
 # ---------------------------------------------------------------------------
+# Model lists (V4.4.1): each provider's own list endpoint, cached per provider, with a short
+# built-in list when it can't be had (no key, offline, error).
+
+BUILTIN_MODELS = {
+    "anthropic": [("claude-opus-5-5", "Claude Opus 5.5"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+                  ("claude-haiku-5-5", "Claude Haiku 5.5"), ("claude-fable-5-1", "Claude Fable 5.1")],
+    "openai": [("gpt-5.4-mini", "GPT-5.4 mini"), ("gpt-5.4", "GPT-5.4")],
+    "gemini": [("gemini-flash-latest", "Gemini Flash (latest)"), ("gemini-pro-latest", "Gemini Pro (latest)")],
+    "openrouter": [("openrouter/auto", "Auto (best for the prompt)")],
+    "custom": [],
+}
+_model_cache: dict = {}
+_OPENAI_SKIP = ("embedding", "whisper", "tts", "dall-e", "image", "audio", "realtime", "transcribe",
+                "moderation", "search", "davinci", "babbage", "computer-use", "sora")
+_GEMINI_SKIP = ("embedding", "aqa", "imagen", "veo", "tts", "image", "audio", "live")
+
+
+def _version_key(model_id: str) -> tuple:
+    """Newest-first ordering when a list has no dates: the numbers in the id, biggest first."""
+    return tuple(float(n) for n in re.findall(r"\d+(?:\.\d+)?", model_id)) or (0.0,)
+
+
+def _get(url: str, headers: dict, timeout: float = 15) -> dict:
+    req = urllib.request.Request(url, headers={"User-Agent": "srt-generator", **headers})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise _http_error(e.code, e.read().decode("utf-8", "replace")[:2000])
+    except (urllib.error.URLError, TimeoutError, ssl.SSLError, ValueError):
+        raise PolishError("offline", "Couldn't load the model list")
+
+
+def _fetch_models(code: str, settings: dict) -> list[dict]:
+    key = get_key(code)
+    if code == "anthropic":
+        import anthropic
+        if not key:
+            raise PolishError("auth", "No key saved")
+        ws = settings.get("anthropic_workspace_id")
+        client = anthropic.Anthropic(api_key=key, timeout=15, max_retries=0,
+                                     default_headers={"anthropic-workspace-id": ws} if ws else None)
+        try:
+            items = list(client.models.list(limit=100))
+        except anthropic.APIError as e:
+            raise PolishError("invalid", f"Couldn't load Anthropic's models ({e.__class__.__name__})")
+        return [{"id": m.id, "name": m.display_name or m.id, "created": m.created_at.timestamp()} for m in items]
+    if code in ("openai", "custom"):
+        base = (settings["custom_base_url"] if code == "custom" else PROVIDERS["openai"]["base_url"]).rstrip("/")
+        if not base:
+            raise PolishError("config", "No base URL")
+        if not key and not (code == "custom" and _local(base)):
+            raise PolishError("auth", "No key saved")
+        data = _get(f"{base}/models", {"Authorization": f"Bearer {key}"} if key else {})
+        models = [{"id": m["id"], "name": m["id"], "created": m.get("created") or 0} for m in data.get("data", [])]
+        if code == "openai":  # chat/text models only
+            models = [m for m in models if re.match(r"(gpt-|o\d|chatgpt)", m["id"])
+                      and not any(s in m["id"] for s in _OPENAI_SKIP)]
+        return models
+    if code == "gemini":
+        if not key:
+            raise PolishError("auth", "No key saved")
+        data = _get(f"{PROVIDERS['gemini']['base_url']}/models?pageSize=1000", {"x-goog-api-key": key})
+        out = []
+        for m in data.get("models", []):
+            mid = m.get("name", "").removeprefix("models/")
+            if "generateContent" in m.get("supportedGenerationMethods", []) and mid.startswith("gemini") \
+                    and not any(s in mid for s in _GEMINI_SKIP):
+                out.append({"id": mid, "name": m.get("displayName") or mid, "created": 0})
+        return out
+    if code == "openrouter":
+        data = _get("https://openrouter.ai/api/v1/models", {"Authorization": f"Bearer {key}"} if key else {})
+        return [{"id": m["id"], "name": m.get("name") or m["id"], "created": m.get("created") or 0}
+                for m in data.get("data", [])]
+    return []
+
+
+def list_models(code: str, refresh: bool = False) -> dict:
+    """{"models": [{"id", "name"}], "source": "live" | "builtin", "error"} — newest first."""
+    if not refresh and code in _model_cache:
+        return _model_cache[code]
+    settings = load_settings()
+    try:
+        models = _fetch_models(code, settings)
+        if not models:
+            raise PolishError("invalid", "The provider listed no usable models")
+        models.sort(key=lambda m: (m["created"], _version_key(m["id"])), reverse=True)
+        result = {"models": [{"id": m["id"], "name": m["name"]} for m in models], "source": "live", "error": None}
+        _model_cache[code] = result
+    except PolishError as e:
+        result = {"models": [{"id": i, "name": n} for i, n in BUILTIN_MODELS.get(code, [])],
+                  "source": "builtin", "error": str(e)}  # not cached: try the live list next time
+    except Exception:
+        result = {"models": [{"id": i, "name": n} for i, n in BUILTIN_MODELS.get(code, [])],
+                  "source": "builtin", "error": "Couldn't load the model list"}
+    return result
+
+
+# ---------------------------------------------------------------------------
 # The request
 
 RESPONSE_SCHEMA = {"type": "object", "properties": {"lines": {"type": "array", "items": {"type": "string"}}},
