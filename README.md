@@ -11,7 +11,7 @@ Every section has the same two ways in:
 - **I have the lyrics/script:** paste the exact words and they're snapped to the audio, so every subtitle matches a line exactly as written.
 - **Transcribe for me:** Whisper writes a draft; you correct it and approve it, then it's timed the same way.
 
-Everything runs on your machine; files never leave your computer.
+Everything runs on your machine; files never leave your computer. (The one exception is optional and off by default: [AI polish](#ai-polish-optional-online) sends transcript text — never audio or video — to an AI provider you choose.)
 
 ## Install — Apple Silicon Macs (M1, M2, M3, M4)
 
@@ -73,6 +73,28 @@ Until you pick one, it's **Automatic**: Hindi or Urdu audio is written as Hingli
 - **Topic words** (any script) are passed to Whisper as hints, ahead of the most frequent words from your corrections file.
 - **Timing is unchanged**: the approved text is still aligned by the standard model, which tested more precise than the Hinglish model's own alignment (DECISIONS.md V4.2).
 
+## AI polish (optional, online)
+
+After the offline draft is ready, an AI model of your choice can fix the words it misheard. **It's off until you add a key**, and it's the only part of the app that sends anything out: **only the transcript text is sent to the provider you choose. Audio and video never leave this computer.**
+
+**Set it up** in the **Corrections** tab → **AI polish**: pick a provider, paste your API key (**Save key**), check the model name, click **Test connection**, then switch it **On**.
+
+| Provider | Default model (editable) | Get a key |
+|---|---|---|
+| Anthropic (Claude) | `claude-opus-5-5` | [console.anthropic.com → API keys](https://console.anthropic.com/settings/keys). Use a key created inside a workspace, or type the workspace ID (`wrkspc_…`) in the *Workspace ID* field |
+| OpenAI | `gpt-5.4-mini` | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
+| Google Gemini | `gemini-flash-latest` | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) |
+| OpenRouter | `openrouter/auto` | [openrouter.ai/keys](https://openrouter.ai/keys) — one key for many models |
+| Custom (OpenAI-compatible) | — type it in | Any server that speaks OpenAI's Chat Completions API: DeepSeek (`https://api.deepseek.com/v1`), Groq (`https://api.groq.com/openai/v1`), Mistral (`https://api.mistral.ai/v1`), a local **Ollama** (`http://localhost:11434/v1`, no key needed) or **LM Studio** (`http://localhost:1234/v1`). Enter its base URL and model name |
+
+Providers charge for API use; a short transcript costs very little per polish. Keys are stored in your Mac's **Keychain** (Windows: **Credential Manager**), one per provider — never in `config.py`, the settings file, logs, job folders or `corrections.md`.
+
+**What happens:** with AI polish on, every transcription in every tab gets an extra step, *Polishing with <provider>…*, right after the offline draft. The provider receives the draft's lines, the section, the script and language, your topic words, the relevant rows of your corrections file and house spellings, and the words the offline pass doubted. It's told to fix misheard or misspelled words only, keep exactly the same lines in the same order, never add or remove anything, follow your spellings and corrections, and mark anything it isn't sure of as `[word?]`. Its answer must be valid JSON with the same number of lines; a line it rewrote too much is kept as it was. If anything goes wrong — wrong line count, invalid answer, timeout, rate limit, bad key, no internet — **the offline draft stays** and one line says why. Nothing else is blocked.
+
+**Reviewing:** AI changes are highlighted in **blue**, fixes from your corrections file in **green**; the draft shows the counts (e.g. *“8 AI fixes · 3 from your corrections file”*). Hover a highlight to see the original word and **Undo** it. A `[word?]` is the AI's unsure guess: **Keep** drops the brackets (any left are removed when you approve). **Polish again** sends the box's current text for another pass.
+
+**Learning from it:** on approval, every kept change is added to `corrections.md` with a **Source**: *AI* (the AI's fix, kept), *User* (your own) or *AI+User* (the AI changed it and you edited it further). AI fixes you undid are **not** learnt; they're listed in the job folder (`ai-rejected.json`, and in `corrections-diff.md`) so a wrong AI fix is never taught to the app. Each job folder also keeps `ai-polish.json` (what was sent and returned, the model and the time).
+
 ## Corrections — teach it your words
 
 Every time you approve a transcript, the app compares Whisper's draft with what you approved, word by word on each line, and adds each fix to **`corrections.md`** (in the Mac app: `~/Library/Application Support/SRT Generator/corrections.md`; in a checkout or the Windows folder: next to `app.py`). Then, in every tab:
@@ -85,13 +107,15 @@ The file is plain Markdown that you can also edit in any text editor — one tab
 
 ```markdown
 ## Hinglish
-| Wrong | Correct | Times seen | Last seen | Notes |
-|---|---|---|---|---|
-| adti | Aditi | 5 | 2026-11-02 | |
-| ~~main~~ | mein | 2 | 2026-11-01 | struck through = switched off |
+| Wrong | Correct | Times seen | Last seen | Source | Notes |
+|---|---|---|---|---|---|
+| adti | Aditi | 5 | 2026-11-02 | User | |
+| ~~main~~ | mein | 2 | 2026-11-01 | AI | struck through = switched off |
 ```
 
-The **Corrections** tab (next to Song / Drama / Reels) shows them all in a searchable table: edit, switch off or delete any row, or add one by hand. **Upload .md** (or drop files on the tab) merges teammates' files into yours: bad rows are listed with their line numbers and the file isn't merged; when two files fix the same wrong word differently you pick one (the one seen more often is preselected). **Download corrections.md** saves the merged file to share. **Reset** clears it after saving a backup in `corrections-backups/` (merges back up the old file too).
+**Source** (since 4.3) says who made the fix: *User*, *AI* or *AI+User* (see [AI polish](#ai-polish-optional-online)). Files from before 4.3 have no Source column; they still upload and merge, and their rows count as *User*.
+
+The **Corrections** tab (next to Song / Drama / Reels) shows them all in a searchable table: edit, switch off or delete any row, or add one by hand. Filter by **Source**, and **Switch off AI rows** turns off every fix that came from AI polish alone in one go. **Upload .md** (or drop files on the tab) merges teammates' files into yours: bad rows are listed with their line numbers and the file isn't merged; when two files fix the same wrong word differently you pick one (the one seen more often is preselected). **Download corrections.md** saves the merged file to share. **Reset** clears it after saving a backup in `corrections-backups/` (merges back up the old file too).
 
 Every job is also saved in the `jobs/` folder (the input audio, or just the sound of a video, plus vocals, the draft, the approved text, SRT, cue data and log). In the Mac app that's `~/Library/Application Support/SRT Generator/jobs/` (in Finder: Go → Go to Folder…). Delete old job folders whenever you like.
 

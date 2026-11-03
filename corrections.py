@@ -4,15 +4,19 @@ corrections.md lives in the data folder (DATA_DIR) and is plain Markdown that pe
 read and edit in any text editor, and share with teammates:
 
     ## Hinglish
-    | Wrong | Correct | Times seen | Last seen | Notes |
-    |---|---|---|---|---|
-    | adti | Aditi | 3 | 2026-11-02 | |
-    | ~~main~~ | mein | 2 | 2026-11-02 | disabled: strikethrough |
+    | Wrong | Correct | Times seen | Last seen | Source | Notes |
+    |---|---|---|---|---|---|
+    | adti | Aditi | 3 | 2026-11-02 | User | |
+    | ~~main~~ | mein | 2 | 2026-11-02 | AI | disabled: strikethrough |
 
 One table per script (Hinglish, Hindi (Devanagari), Urdu, English, …). Every approved
 transcription adds its fixes (Whisper's draft vs the approved text, word by word per line);
 every new draft has the enabled fixes for its script applied before the user sees it, and
 the most frequent correct words are passed to Whisper as hotwords.
+
+Source (V4.3) says who made the fix: User, AI (an AI polish fix the user kept) or AI+User (the AI
+changed the word and the user edited it further). Files from before V4.3 have no Source column;
+their rows count as User.
 """
 
 import difflib
@@ -25,7 +29,8 @@ from pathlib import Path
 
 FILE_NAME = "corrections.md"
 BACKUP_DIR = "corrections-backups"
-COLUMNS = ["Wrong", "Correct", "Times seen", "Last seen", "Notes"]
+COLUMNS = ["Wrong", "Correct", "Times seen", "Last seen", "Source", "Notes"]
+SOURCES = ("User", "AI", "AI+User")
 MAX_PHRASE_WORDS = 4  # longer rewrites are kept in the job's diff but not learned
 HOTWORD_TOKENS = 200  # Whisper's prompt holds 223 tokens (half its 448-token context)
 
@@ -40,7 +45,8 @@ How to edit this file by hand:
 
 - One table per script, under a `## Script name` heading (Hinglish, Hindi (Devanagari), Urdu, English, …).
 - Columns: **Wrong** (what Whisper writes; can be a few words) · **Correct** · **Times seen**
-  (a whole number) · **Last seen** (YYYY-MM-DD) · **Notes** (optional).
+  (a whole number) · **Last seen** (YYYY-MM-DD) · **Source** (User, AI or AI+User: who made the
+  fix; empty means User) · **Notes** (optional). Files without a Source column still work.
 - To switch a row off without deleting it, strike the wrong word through: `~~adti~~`.
 - Write a `|` inside a cell as `\\|`.
 - Share it with your team: they upload it in the app's Corrections tab and it's merged with theirs.
@@ -134,10 +140,12 @@ def parse(text: str, source: str = "corrections.md") -> dict:
     tables: dict[str, dict] = {}
     errors: list[str] = []
     current = None
+    source_col = None  # index of the Source column in the current table; None = pre-V4.3 layout
     for n, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
         if stripped.startswith("## "):
             current = stripped[3:].strip()
+            source_col = None
             if not current:
                 errors.append(f"{source} line {n}: a table heading needs a script name")
                 current = None
@@ -150,6 +158,8 @@ def parse(text: str, source: str = "corrections.md") -> dict:
         if all(re.fullmatch(r":?-{3,}:?", c) for c in cells if c):
             continue  # the |---| separator row
         if [c.lower() for c in cells[:4]] == [c.lower() for c in COLUMNS[:4]]:
+            lowered = [c.lower() for c in cells]
+            source_col = lowered.index("source") if "source" in lowered else None
             continue  # header row
         where = f"{source} line {n}"
         if current is None:
@@ -159,7 +169,12 @@ def parse(text: str, source: str = "corrections.md") -> dict:
             errors.append(f"{where}: needs at least 4 columns (Wrong | Correct | Times seen | Last seen), found {len(cells)}")
             continue
         wrong, correct, count, seen = cells[:4]
-        notes = cells[4] if len(cells) > 4 else ""
+        if source_col is None:
+            origin, notes = "", cells[4] if len(cells) > 4 else ""
+        else:
+            origin = cells[source_col] if len(cells) > source_col else ""
+            rest = [c for i, c in enumerate(cells[4:], start=4) if i != source_col]
+            notes = rest[0] if rest else ""
         disabled = bool(re.fullmatch(r"~~.+~~", wrong))
         if disabled:
             wrong = wrong[2:-2].strip()
@@ -168,6 +183,9 @@ def parse(text: str, source: str = "corrections.md") -> dict:
             bad.append("'Wrong' is empty")
         if not correct.strip():
             bad.append("'Correct' is empty")
+        origin = {s.casefold(): s for s in SOURCES}.get(origin.strip().casefold().replace(" ", ""), origin.strip())
+        if origin and origin not in SOURCES:
+            bad.append(f"'Source' must be User, AI or AI+User (got '{origin}')")
         if not re.fullmatch(r"\d+", count) or int(count) < 1:
             bad.append(f"'Times seen' must be a whole number of 1 or more (got '{count}')")
         try:
@@ -182,7 +200,8 @@ def parse(text: str, source: str = "corrections.md") -> dict:
             errors.append(f"{where}: " + "; ".join(bad))
             continue
         tables[current][key] = {"wrong": wrong, "correct": correct.strip(), "count": int(count),
-                                "last_seen": seen, "notes": notes, "disabled": disabled, "line": n}
+                                "last_seen": seen, "source": origin or "User", "notes": notes,
+                                "disabled": disabled, "line": n}
     if errors:
         raise CorrectionsError(errors)
     for rows in tables.values():
@@ -207,7 +226,8 @@ def render(tables: dict) -> str:
         for row in sorted(rows.values(), key=lambda r: (-r["count"], r["wrong"].casefold())):
             wrong = _cell(row["wrong"])
             out.append(f"| {'~~' + wrong + '~~' if row['disabled'] else wrong} | {_cell(row['correct'])} "
-                       f"| {row['count']} | {row['last_seen']} | {_cell(row.get('notes', ''))} |")
+                       f"| {row['count']} | {row['last_seen']} | {row.get('source') or 'User'} "
+                       f"| {_cell(row.get('notes', ''))} |")
         out.append("")
     return "\n".join(out).rstrip() + "\n"
 
@@ -343,15 +363,25 @@ def diff_markdown(diff: list[dict]) -> str:
     return "\n".join(out) + "\n" if out else "No changes: the draft was approved as Whisper wrote it.\n"
 
 
-def record(data_dir: Path, table: str, pairs: list[tuple[str, str]], today: str | None = None) -> list[dict]:
-    """Add approved fixes to corrections.md. Same fix again → Times seen + 1; a different fix for
-    the same wrong word → the newest wins, the old one is noted. Returns what changed."""
+def combine_sources(a: str | None, b: str | None) -> str:
+    """Who made a fix, once both have: the same source stays, anything mixed is AI+User."""
+    a, b = a or "User", b or "User"
+    return a if a == b else "AI+User"
+
+
+def record(data_dir: Path, table: str, pairs: list[tuple], today: str | None = None) -> list[dict]:
+    """Add approved fixes to corrections.md. pairs: (wrong, correct) or (wrong, correct, source),
+    source User (default), AI or AI+User. Same fix again → Times seen + 1 (sources combined); a
+    different fix for the same wrong word → the newest wins, the old one is noted. Returns what
+    changed."""
     today = today or date.today().isoformat()
     changed = []
     with _lock:
         tables = load(data_dir)
         rows = tables.setdefault(table, {})
-        for wrong, correct in pairs:
+        for pair in pairs:
+            wrong, correct = pair[0], pair[1]
+            origin = pair[2] if len(pair) > 2 else "User"
             key = key_of(wrong)
             if not key or wrong == correct:
                 continue
@@ -361,16 +391,20 @@ def record(data_dir: Path, table: str, pairs: list[tuple[str, str]], today: str 
             if row and row["correct"] == correct:
                 row["count"] += 1
                 row["last_seen"] = today
-                changed.append({"wrong": wrong, "correct": correct, "count": row["count"], "change": "seen again"})
+                row["source"] = combine_sources(row.get("source"), origin)
+                changed.append({"wrong": wrong, "correct": correct, "count": row["count"],
+                                "source": row["source"], "change": "seen again"})
             elif row:
                 note = f"was “{row['correct']}” ({row['count']}×, last {row['last_seen']})"
                 rows[key] = {"wrong": row["wrong"], "correct": correct, "count": 1, "last_seen": today,
-                             "notes": note, "disabled": row["disabled"]}
-                changed.append({"wrong": wrong, "correct": correct, "count": 1, "change": note})
+                             "source": origin, "notes": note, "disabled": row["disabled"]}
+                changed.append({"wrong": wrong, "correct": correct, "count": 1, "source": origin,
+                                "change": note})
             else:
                 rows[key] = {"wrong": wrong, "correct": correct, "count": 1, "last_seen": today,
-                             "notes": "", "disabled": False}
-                changed.append({"wrong": wrong, "correct": correct, "count": 1, "change": "new"})
+                             "source": origin, "notes": "", "disabled": False}
+                changed.append({"wrong": wrong, "correct": correct, "count": 1, "source": origin,
+                                "change": "new"})
         save(data_dir, tables)
     return changed
 
@@ -566,11 +600,13 @@ def merge_plan(mine: dict, uploads: list[tuple[str, dict]]) -> dict:
     options: dict[tuple, list] = {}
     for table, rows in mine.items():
         for key, row in rows.items():
-            options.setdefault((table, key), []).append({"source": "Your corrections", **row})
+            options.setdefault((table, key), []).append({**row, "source_kind": row.get("source"),
+                                                         "source": "Your corrections"})
     for name, tables in uploads:
         for table, rows in tables.items():
             for key, row in rows.items():
-                options.setdefault((table, key), []).append({"source": name, **row})
+                options.setdefault((table, key), []).append({**row, "source_kind": row.get("source"),
+                                                             "source": name})
     added, same, conflicts = 0, 0, []
     for (table, key), opts in options.items():
         distinct = {o["correct"] for o in opts}
@@ -604,7 +640,8 @@ def merge(mine: dict, uploads: list[tuple[str, dict]], choices: dict | None = No
                 if key in target:
                     cur = target[key]
                     target[key] = {**cur, "count": max(cur["count"], row["count"]),
-                                   "last_seen": max(cur["last_seen"], row["last_seen"])}
+                                   "last_seen": max(cur["last_seen"], row["last_seen"]),
+                                   "source": combine_sources(cur.get("source"), row.get("source"))}
                 else:
                     target[key] = dict(row)
     for (table, key), c in conflict_keys.items():
@@ -613,6 +650,6 @@ def merge(mine: dict, uploads: list[tuple[str, dict]], choices: dict | None = No
         note = "; ".join(f"{o['source']}: “{o['correct']}” ({o['count']}×)" for o in others)
         merged.setdefault(table, {})[key] = {
             "wrong": pick["wrong"], "correct": pick["correct"], "count": pick["count"],
-            "last_seen": pick["last_seen"], "disabled": pick["disabled"],
+            "last_seen": pick["last_seen"], "disabled": pick["disabled"], "source": pick.get("source_kind") or "User",
             "notes": ("chosen over " + note) if note else pick.get("notes", "")}
     return merged

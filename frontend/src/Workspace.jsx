@@ -326,6 +326,19 @@ function useHinglishModel(wanted) {
   return [model, start];
 }
 
+/** Whether AI polish is on (and can run), re-checked whenever the tab becomes visible. */
+function useAiPolish(active) {
+  const [name, setName] = useState(null);
+  useEffect(() => {
+    if (!active) return;
+    fetch("/api/ai").then(r => r.json()).then(s => {
+      const p = (s.providers || []).find(x => x.code === s.provider);
+      setName(s.enabled && s.usable && p ? p.name : null);
+    }).catch(() => {});
+  }, [active]);
+  return name;
+}
+
 /** One section's whole workbench (Song, Drama or Reels/YouTube). Every tab stays mounted, so
     each keeps its own file, draft and result; its settings are remembered per section. */
 export default function Workspace({ section, preset, meta, active }) {
@@ -375,6 +388,7 @@ export default function Workspace({ section, preset, meta, active }) {
     (scriptPick === AUTO_SCRIPT && ["auto", "hi", "ur", "hinglish"].includes(language)));
   const speed = quality === "fast" || quality === "accurate" ? quality : meta?.quality_default || "accurate";
   const [hinglishModel, downloadModel] = useHinglishModel(active && maybeHinglish);
+  const aiOn = useAiPolish(active);  // the provider's name while AI polish is on, else null
 
   useEffect(() => () => clearInterval(pollRef.current), []);
 
@@ -462,6 +476,7 @@ export default function Workspace({ section, preset, meta, active }) {
       if (s.status !== "draft") { setPhase(s.status); return; }
       setLyrics(s.draft_text || "");
       setMarks([
+        ...(s.ai_marks || []).map((h, i) => ({ ...h, id: `a${i}` })),
         ...(s.auto_corrections || []).map((h, i) => ({ ...h, kind: "auto", id: `m${i}` })),
         ...(s.review_marks || []).map((h, i) => ({ ...h, id: `r${i}` })),
       ]);
@@ -471,7 +486,21 @@ export default function Workspace({ section, preset, meta, active }) {
         corrected: (s.auto_corrections || []).length, table: s.corrections_table,
         hotwords: s.hotwords, engine: s.engine, quality: s.quality,
         review: (s.review_marks || []).length,
+        ai: (s.ai_marks || []).length, aiMessage: s.ai_message, aiProvider: s.ai_provider,
       });
+      setPhase("draft");
+    });
+  }
+
+  /** "Polish again": the AI polishes the draft box's text as it is now. */
+  function polishAgain() {
+    if (!job?.id || !lyrics.trim() || working) return;
+    submit(`/api/jobs/${job.id}/polish`, { lyrics }, s => {
+      if (s.status !== "draft") { setPhase(s.status); return; }
+      setLyrics(s.draft_text || lyrics);
+      setMarks(ms => [...ms.filter(m => m.kind !== "ai" && m.kind !== "ai-unsure"),
+        ...(s.ai_marks || []).map((h, i) => ({ ...h, id: `a${s.polish_run}-${i}` }))]);
+      setDraft(d => ({ ...d, ai: (s.ai_marks || []).length, aiMessage: s.ai_message, aiProvider: s.ai_provider }));
       setPhase("draft");
     });
   }
@@ -502,8 +531,13 @@ export default function Workspace({ section, preset, meta, active }) {
     if (live) setLyrics(lyrics.slice(0, live.at.from) + mark.original + lyrics.slice(live.at.to));
     setMarks(ms => ms.filter(m => m.id !== mark.id));
   }
-  /** A highlighted word is fine as it is: drop the highlight. */
+  /** A highlighted word is fine as it is: drop the highlight ("[word?]" loses its brackets). */
   function keepMark(mark) {
+    const live = liveMarks(lyrics, marks).find(m => m.id === mark.id);
+    if (live && mark.kind === "ai-unsure") {
+      const word = mark.replacement.replace(/^\[(.*)\?\]$/, "$1");
+      setLyrics(lyrics.slice(0, live.at.from) + word + lyrics.slice(live.at.to));
+    }
     setMarks(ms => ms.filter(m => m.id !== mark.id));
   }
 
@@ -523,7 +557,9 @@ export default function Workspace({ section, preset, meta, active }) {
   }
 
   const live = liveMarks(lyrics, marks);
-  const toCheck = live.filter(m => m.kind && m.kind !== "auto").length;
+  const toCheck = live.filter(m => ["disagree", "unsure", "rechecked"].includes(m.kind)).length;
+  const aiLive = live.filter(m => m.kind === "ai" || m.kind === "ai-unsure").length;
+  const autoLive = live.filter(m => m.kind === "auto").length;
   const steps = job?.steps || DEFAULT_STEPS;
   const stageIdx = job?.stage ? job.stage - 1 : 0;
   const cues = phase === "done" ? job?.cues || [] : [];
@@ -636,7 +672,18 @@ export default function Workspace({ section, preset, meta, active }) {
                 wrong words, then approve. One line = one subtitle (long lines are split to fit).
               </p>
             )}
-            {transcribing && hasDraft && draft.corrected > 0 && (
+            {transcribing && hasDraft && (draft.ai > 0 || draft.aiProvider) && (
+              <p className="autofix-note ai-note" data-testid="ai-count">
+                <b className="ai">{aiLive} AI {aiLive === 1 ? "fix" : "fixes"}</b>
+                {" · "}<b>{autoLive} from your corrections file</b>
+                {draft.aiProvider && <> — polished by {draft.aiProvider}.</>} Hover a highlight to see the
+                original word and undo it.
+              </p>
+            )}
+            {transcribing && hasDraft && draft.aiMessage && (
+              <div className="warnbox draft-note" data-testid="ai-message">{draft.aiMessage}</div>
+            )}
+            {transcribing && hasDraft && draft.corrected > 0 && !draft.aiProvider && (
               <p className="autofix-note" data-testid="autofix-count">
                 <b>{draft.corrected} {draft.corrected === 1 ? "word" : "words"} auto-corrected</b> from your
                 corrections file ({draft.table}). They're highlighted — hover one to see what Whisper
@@ -768,6 +815,11 @@ export default function Workspace({ section, preset, meta, active }) {
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M2 8h11M9.5 4.5 13 8l-3.5 3.5" /></svg>
               </span>
             </button>
+            {hasDraft && !working && aiOn && (
+              <button className="retranscribe" onClick={polishAgain} data-testid="polish-again">
+                Polish again with {aiOn}
+              </button>
+            )}
             {hasDraft && !working && (
               <button className="retranscribe" onClick={transcribe}>Discard the draft and transcribe again</button>
             )}

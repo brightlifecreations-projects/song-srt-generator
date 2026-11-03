@@ -1034,6 +1034,28 @@ textarea.lyrics::placeholder { color: var(--muted); }
 .topicwords input:focus { outline: none; border-color: var(--accent); }
 .autofix-note b.check { color: var(--ink); }
 
+/* ---------- AI polish (V4.3): AI changes in the accent colour, corrections file in green ---------- */
+.drafteditor-back mark[data-kind="ai"],
+.drafteditor-back mark[data-kind="ai-unsure"] {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  border-bottom-color: var(--accent);
+}
+.drafteditor-back mark[data-kind="ai-unsure"] { border-bottom-style: dashed; }
+.autofix-note b.ai { color: var(--accent); }
+.ai-panel { margin: 18px 0 26px; padding: 18px 20px; border: 1px solid var(--line); border-radius: 10px; }
+.ai-panel h3 { margin: 0 0 4px; }
+.ai-panel .ai-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
+.ai-panel input, .ai-panel select {
+  font: inherit; font-size: 13.5px; padding: 7px 10px; color: var(--ink); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; min-width: 220px;
+}
+.ai-panel .ai-privacy { font-size: 13px; color: var(--ink-soft); margin: 10px 0 0; }
+.ai-panel .ai-status { font-size: 12.5px; }
+.ai-panel .ai-status.ok { color: var(--ok); }
+.ai-panel .ai-status.bad { color: var(--leak, #cf2e1e); }
+.switch { display: inline-flex; align-items: center; gap: 8px; font-size: 13.5px; cursor: pointer; }
+.corr-filter { margin-left: 10px; }
+
 /* ---------- Corrections tab (V4.1) ---------- */
 .corrections { padding: 30px 0 64px; }
 .corr-head { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; }

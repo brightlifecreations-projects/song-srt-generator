@@ -40,6 +40,10 @@ function TipText({ mark }) {
       return <>The Hinglish model wasn't sure of this word ({pct}%)</>;
     case "rechecked":
       return <>Re-checked on its own — first heard <b>“{mark.original}”</b></>;
+    case "ai":
+      return <>AI changed this from <b>“{mark.original}”</b></>;
+    case "ai-unsure":
+      return <>The AI isn't sure — it was <b>“{mark.original}”</b></>;
     default:
       return <>Auto-corrected from <b>“{mark.original}”</b></>;
   }
@@ -124,11 +128,11 @@ export default function DraftEditor({ value, onChange, marks, onUndo, onUse, onK
         <div className="drafttip" role="tooltip" style={{ left: tip.x, top: tip.y }}
           onMouseEnter={() => clearTimeout(hideTimer.current)} onMouseLeave={scheduleHide}>
           <TipText mark={tip.mark} />
-          {(!tip.mark.kind || tip.mark.kind === "auto" || tip.mark.kind === "rechecked") &&
+          {(!tip.mark.kind || ["auto", "rechecked", "ai", "ai-unsure"].includes(tip.mark.kind)) &&
             <button onClick={() => { onUndo(tip.mark); setTip(null); }}>Undo</button>}
           {tip.mark.kind === "disagree" && tip.mark.original &&
             <button onClick={() => { onUse(tip.mark); setTip(null); }}>Use “{tip.mark.original}”</button>}
-          {tip.mark.kind && tip.mark.kind !== "auto" &&
+          {tip.mark.kind && !["auto", "ai"].includes(tip.mark.kind) &&
             <button onClick={() => { onKeep(tip.mark); setTip(null); }}>Keep</button>}
         </div>
       )}

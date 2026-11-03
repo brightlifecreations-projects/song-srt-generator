@@ -26,13 +26,14 @@ from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+import ai_polish
 import config
 import corrections
 import hinglish_model
 from pipeline import (ACCEPTED_EXTENSIONS, AUTO_LANGUAGE, DATA_DIR, DEFAULT_SCRIPT, QUALITIES,
                       SCRIPT_CODES, PipelineError, align_and_write, clean_isolate, clean_section,
                       flow_steps, is_video, make_reporter, preprocess_lyrics, record_approval,
-                      run_transcription, start_job)
+                      run_polish, run_transcription, start_job)
 
 ROOT = Path(__file__).parent
 DIST = ROOT / "frontend" / "dist"
@@ -91,7 +92,7 @@ def _run_job(job: dict):
     def progress(step, total, message, fraction=None):
         job.update(stage=step, message=message, progress=fraction)
 
-    steps = flow_steps(job["mode"], job["section"], job["isolate"])
+    steps = flow_steps(job["mode"], job["section"], job["isolate"], job.get("polish_with"))
     report = make_reporter(steps, progress)
     if job["task"] == "lyrics":
         preprocess_lyrics(job["lyrics_text"], strip_tags=job["strip_tags"])  # fail fast
@@ -104,9 +105,15 @@ def _run_job(job: dict):
     ctx = job["ctx"]
     if job["task"] == "transcribe":
         draft = run_transcription(ctx, job["language"], report, job["script"], job["quality"],
-                                  job["topic_words"])
+                                  job["topic_words"], job.get("ai"))
         job.update(status="draft", message="Draft ready", timings=dict(ctx["timings"]),
                    warnings=list(ctx["warnings"]), job_dir=ctx["job_dir"].name, **draft)
+        return
+    if job["task"] == "polish":  # "Polish again": the text in the draft box, as it is now
+        polished = run_polish(ctx, job["polish_text"], job["ai"], report)
+        job.update(status="draft", message="Draft ready", draft_text=polished["draft_text"],
+                   ai_marks=polished["ai_marks"], ai_message=polished["ai_message"],
+                   ai_provider=polished["ai_provider"], polish_run=job.get("polish_run", 0) + 1)
         return
     result = align_and_write(ctx, job["lyrics_text"], strip_tags=job["strip_tags"],
                              video_format=job["video_format"], language=job["language"],
@@ -250,7 +257,7 @@ def _clean_choices(video_format: str, language: str, section: str, default_langu
 
 
 def _queue(job_id: str, job: dict):
-    steps = flow_steps(job["mode"], job["section"], job["isolate"])
+    steps = flow_steps(job["mode"], job["section"], job["isolate"], job.get("polish_with"))
     job.update(status="queued", message="Waiting for a free slot…",
                steps=[title for _, title in steps])
     job.setdefault("stage", 0)
@@ -310,8 +317,10 @@ async def create_transcription(
     if isinstance(saved, JSONResponse):
         return saved
     job_id, upload_dir, audio_path = saved
+    ai = ai_polish.active()  # None unless AI polish is switched on and has a key
     return _queue(job_id, {
         "task": "transcribe", "mode": "transcribe", "created": time.time(),
+        "ai": ai, "polish_with": ai_polish.provider_name(ai["provider"]) if ai else None,
         "audio_path": str(audio_path), "upload_dir": str(upload_dir),
         "language": language, "section": section, "isolate": clean_isolate(isolate, section),
         "video_preview": video_preview,
@@ -336,9 +345,28 @@ def approve_transcript(
                             status_code=409)
     video_format, language, _ = _clean_choices(
         video_format, language, job["section"], AUTO_LANGUAGE)
+    lyrics = ai_polish.UNSURE.sub(r"\1", lyrics)  # "[zaroor?]" marks a word to check, not text
     job.pop("finished", None)
     job.update(task="align", stage=job.get("stage", 2), lyrics_text=lyrics,
                strip_tags=strip_tags, video_format=video_format, language=language)
+    return _queue(job_id, job)
+
+
+@app.post("/api/jobs/{job_id}/polish")
+def polish_again(job_id: str, lyrics: str = Form(...)):
+    """AI polish of the draft box's current text, for a job whose draft is ready."""
+    job = JOBS.get(job_id)
+    if not job or job.get("status") not in ("draft", "done", "error") or "ctx" not in job \
+            or job.get("mode") != "transcribe":
+        return JSONResponse({"error": "This transcript has expired. Transcribe the file again."},
+                            status_code=409)
+    ai = ai_polish.active()
+    if not ai:
+        return JSONResponse({"error": "AI polish is off. Switch it on in the Corrections tab."},
+                            status_code=409)
+    job.pop("finished", None)
+    job.update(task="polish", polish_text=lyrics, ai=ai,
+               polish_with=ai_polish.provider_name(ai["provider"]))
     return _queue(job_id, job)
 
 
@@ -347,7 +375,8 @@ PUBLIC_KEYS = ("status", "stage", "steps", "message", "progress", "mode", "secti
                "job_dir", "cues", "timings", "warnings", "audio_ready", "draft_text",
                "detected_language", "detected_language_name", "script", "approximate_timing",
                "script_note", "auto_corrections", "corrections_table", "hotwords",
-               "corrections_recorded", "review_marks", "engine", "quality", "topic_words")
+               "corrections_recorded", "review_marks", "engine", "quality", "topic_words",
+               "offline_draft", "ai_marks", "ai_message", "ai_provider", "polish_run")
 
 
 @app.get("/api/jobs/{job_id}")
@@ -426,11 +455,13 @@ def _tables_from_json(payload: dict) -> dict:
     lines = []
     for t in payload.get("tables", []):
         lines.append(f"## {t['name']}")
+        lines.append("| " + " | ".join(corrections.COLUMNS) + " |")
         for r in t.get("rows", []):
             wrong = corrections._cell(r.get("wrong", "")).strip()
             lines.append(f"| {'~~' + wrong + '~~' if r.get('disabled') else wrong} "
                          f"| {corrections._cell(r.get('correct', ''))} | {r.get('count', '')} "
-                         f"| {r.get('last_seen', '')} | {corrections._cell(r.get('notes', ''))} |")
+                         f"| {r.get('last_seen', '')} | {r.get('source') or 'User'} "
+                         f"| {corrections._cell(r.get('notes', ''))} |")
     return corrections.parse("\n".join(lines), "your edits")
 
 
@@ -556,6 +587,71 @@ async def spellings_put(request: Request):
 def spellings_reset():
     corrections.reset_spellings(DATA_DIR)
     return _spellings_state()
+
+
+# ---------------------------------------------------------------------------
+# AI polish settings (DECISIONS V4.3). Keys go to the system key store and never come back out.
+
+@app.get("/api/ai")
+def ai_get():
+    return ai_polish.public_state()
+
+
+@app.put("/api/ai")
+async def ai_put(request: Request):
+    body = await request.json()
+    current = ai_polish.load_settings()
+    models = {**current["models"], **{k: v for k, v in (body.get("models") or {}).items() if v}}
+    settings = {"enabled": bool(body.get("enabled", current["enabled"])),
+                "provider": body.get("provider") if body.get("provider") in ai_polish.PROVIDERS
+                else current["provider"],
+                "models": models, "custom_base_url": body.get("custom_base_url", current["custom_base_url"]),
+                "anthropic_workspace_id": body.get("anthropic_workspace_id", current["anthropic_workspace_id"])}
+    if settings["enabled"] and not ai_polish.usable(settings)[0]:
+        settings["enabled"] = False  # off until it can actually run (a key, a model, a URL)
+    ai_polish.save_settings(settings)
+    return ai_polish.public_state()
+
+
+@app.post("/api/ai/key")
+async def ai_key(request: Request):
+    body = await request.json()
+    provider = body.get("provider")
+    if provider not in ai_polish.PROVIDERS:
+        return JSONResponse({"error": "Unknown provider."}, status_code=400)
+    try:
+        ai_polish.set_key(provider, body.get("key", ""))
+    except ai_polish.PolishError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    except Exception:
+        return JSONResponse({"error": "Couldn't save the key in this computer's key store."}, status_code=500)
+    return ai_polish.public_state()
+
+
+@app.post("/api/ai/test")
+async def ai_test(request: Request):
+    """One tiny real request with the saved key and the given provider/model/URL."""
+    body = await request.json()
+    settings = ai_polish.load_settings()
+    if body.get("provider") in ai_polish.PROVIDERS:
+        settings["provider"] = body["provider"]
+    if body.get("model"):
+        settings["models"][settings["provider"]] = body["model"]
+    for field in ("custom_base_url", "anthropic_workspace_id"):
+        if field in body:
+            settings[field] = body[field]
+    ok, why = ai_polish.usable(settings)
+    if not ok:
+        return {"ok": False, "message": why}
+    try:
+        result = ai_polish.test_connection(settings)
+    except ai_polish.PolishError as e:
+        return {"ok": False, "message": str(e)}
+    except Exception:
+        return {"ok": False, "message": "The test request failed unexpectedly."}
+    return {"ok": True, "message": f"Connected to {ai_polish.provider_name(settings['provider'])} "
+                                   f"({settings['models'][settings['provider']]}) in {result['seconds']:.1f} s. "
+                                   f"Test reply: “{result['reply']}”"}
 
 
 # ---------------------------------------------------------------------------

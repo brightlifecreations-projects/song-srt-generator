@@ -831,13 +831,16 @@ def _job_logger(job_dir: Path) -> logging.Logger:
 ISOLATE_TITLES = {"song": "Isolate vocals", "drama": "Isolate dialogue", "reels": "Isolate voice"}
 
 
-def flow_steps(mode: str, section: str, isolate: str = "on") -> list[tuple[set, str]]:
-    """The progress steps a flow shows, as (stage keys, title). mode: "lyrics" or "transcribe"."""
+def flow_steps(mode: str, section: str, isolate: str = "on",
+               polish_with: str | None = None) -> list[tuple[set, str]]:
+    """The progress steps a flow shows, as (stage keys, title). mode: "lyrics" or "transcribe".
+    polish_with: the AI provider's name when AI polish is on (transcribe mode)."""
     song = section == "song"
     first = ({"prepare", "separate"},
              ISOLATE_TITLES[section] if isolate == "on" else "Prepare audio")
     if mode == "transcribe":
-        return [first, ({"transcribe"}, "Transcribe"),
+        polish = [({"polish"}, f"Polish with {polish_with}")] if polish_with else []
+        return [first, ({"transcribe"}, "Transcribe"), *polish,
                 ({"align"}, "Align transcript"), ({"build"}, "Build subtitles")]
     return [first, ({"align"}, "Align lyrics" if song else "Align transcript"),
             ({"build"}, "Build subtitles")]
@@ -941,12 +944,14 @@ def _house_spellings(ctx: dict) -> dict:
 
 
 def run_transcription(ctx: dict, language: str = None, report=lambda key, msg, fraction=None: None,
-                      script: str = DEFAULT_SCRIPT, quality: str = None, topic_words: str = "") -> dict:
+                      script: str = DEFAULT_SCRIPT, quality: str = None, topic_words: str = "",
+                      ai: dict | None = None) -> dict:
     """Whisper draft of what's sung or said, one phrase per line, for the user to edit.
 
     script: a config.SCRIPTS code, or "default" (no saved choice) to pick Hinglish for
     Hindi/Urdu audio and "same" otherwise. quality ("fast"/"accurate") applies to Hinglish
     drafts. topic_words: the job's names, brands and terms, given to Whisper as hints.
+    ai: AI polish settings (ai_polish.active()) to polish the offline draft with, or None.
     """
     language = language or config.TRANSCRIBE_LANGUAGE
     quality = quality if quality in QUALITIES else config.QUALITY_DEFAULT
@@ -1005,14 +1010,20 @@ def run_transcription(ctx: dict, language: str = None, report=lambda key, msg, f
             counts = {k: sum(m["kind"] == k for m in marks) for k in ("disagree", "unsure", "rechecked")}
             log.info("Review highlights: %s (%d stretches re-checked and replaced)", counts, result["rechecked"])
         ctx.update(whisper_draft=whisper_draft, corrections_table=actual_table,
-                   auto_corrections=hits, review_marks=marks,
+                   auto_corrections=hits, review_marks=marks, offline_draft=draft,
+                   corrections_rows=rows, spellings=spellings, ai_changes=[],
                    recorded_pairs=ctx.get("recorded_pairs") or {})
     except PipelineError:
         raise
     except Exception:
         raise _unexpected(log, job_dir)
+    polished = run_polish(ctx, draft, ai, report) if ai else {}
     return {
-        "draft_text": draft,
+        "draft_text": polished.get("draft_text", draft),
+        "offline_draft": draft,
+        "ai_marks": polished.get("ai_marks", []),
+        "ai_message": polished.get("ai_message"),
+        "ai_provider": polished.get("ai_provider"),
         "whisper_draft": whisper_draft,
         "auto_corrections": hits,
         "review_marks": marks,
@@ -1067,6 +1078,89 @@ def _corrections_for(ctx: dict, script: str, language: str,
     return rows, table, words
 
 
+def run_polish(ctx: dict, text: str, ai: dict, report=lambda key, msg, fraction=None: None) -> dict:
+    """AI polish of the draft text (V4.3). Never fails the job: any problem keeps the text as it is
+    and returns a one-line ai_message. Returns {"draft_text", "ai_marks", "ai_message", "ai_provider"}.
+    The AI's word changes are remembered in ctx["ai_changes"] so approval can tell its fixes apart."""
+    import ai_polish
+
+    log, job_dir = ctx["log"], ctx["job_dir"]
+    name = ai_polish.provider_name(ai["provider"])
+    model = ai["models"][ai["provider"]]
+    report("polish", f"Polishing with {name}…")
+    all_lines = text.split("\n")
+    keep = [i for i, line in enumerate(all_lines) if line.strip()]  # blank lines aren't sent
+    doubtful = [{"line": keep.index(m["line"]) + 1 if m["line"] in keep else None, "word": m["replacement"],
+                 "why": {"disagree": f"a second recogniser heard “{m['original']}”" if m["original"]
+                         else "a second recogniser heard nothing here",
+                         "unsure": "low confidence", "rechecked": "re-checked"}.get(m["kind"], m["kind"])}
+                for m in ctx.get("review_marks") or []]
+    t0 = time.perf_counter()
+    try:
+        result = ai_polish.polish(
+            [all_lines[i] for i in keep], ai, section=ctx["section"], script=ctx.get("script"),
+            language=language_name(ctx.get("detected_language")) if ctx.get("detected_language") else None,
+            topic_words=ctx.get("topic_words") or [], correction_rows=ctx.get("corrections_rows") or {},
+            spellings=ctx.get("spellings") or {}, doubtful=doubtful)
+    except ai_polish.PolishError as e:
+        log.warning("AI polish with %s (%s) skipped after %.1fs: %s (%s)", name, model,
+                    time.perf_counter() - t0, e, e.kind)
+        return {"draft_text": text, "ai_marks": [], "ai_provider": name,
+                "ai_message": f"AI polish skipped — {e}. The offline draft is unchanged."}
+    except Exception:
+        log.error("AI polish raised:\n%s", traceback.format_exc())
+        return {"draft_text": text, "ai_marks": [], "ai_provider": name,
+                "ai_message": "AI polish skipped — something went wrong. The offline draft is unchanged."}
+    for i, line in zip(keep, result["lines"]):
+        all_lines[i] = line
+    marks = [{**m, "line": keep[m["line"]]} for m in result["marks"]]
+    for m in marks:  # "[boss?]" over "boss" flags a word without changing it: not a fix
+        change = {"from": m["original"], "to": ai_polish.UNSURE.sub(r"\1", m["replacement"])}
+        if corrections.key_of(change["from"]) != corrections.key_of(change["to"]) \
+                and change not in ctx.setdefault("ai_changes", []):
+            ctx["ai_changes"].append(change)
+    ctx["ai_polish"] = {"provider": ai["provider"], "model": model,
+                        "runs": (ctx.get("ai_polish") or {}).get("runs", 0) + 1}
+    runs_file = job_dir / "ai-polish.json"
+    runs = json.loads(runs_file.read_text(encoding="utf-8")) if runs_file.exists() else []
+    runs.append({"provider": ai["provider"], "model": model, "seconds": result["seconds"],
+                 "sent": text, "returned": "\n".join(all_lines), "changes": marks,
+                 "lines_kept_unpolished": [keep[i] + 1 for i in result["skipped_lines"]]})
+    runs_file.write_text(json.dumps(runs, indent=1, ensure_ascii=False), encoding="utf-8")
+    log.info("AI polish with %s (%s) in %.1fs: %d changes%s: %s", name, model, result["seconds"],
+             len(marks), f", {len(result['skipped_lines'])} lines rejected and kept as they were"
+             if result["skipped_lines"] else "",
+             ", ".join(f"{m['original']} -> {m['replacement']}" for m in marks) or "none")
+    message = None
+    if result["skipped_lines"]:
+        message = (f"{len(result['skipped_lines'])} line(s) the AI rewrote too much were left as they were.")
+    return {"draft_text": "\n".join(all_lines), "ai_marks": marks, "ai_message": message, "ai_provider": name}
+
+
+def _sources(ctx: dict, pairs: list[tuple[str, str]], approved: str) -> tuple[dict, list[dict]]:
+    """Who made each approved fix — {(wrong, correct): "AI" | "User" | "AI+User"} — and the AI
+    changes the user undid (never learnt; noted in the job folder only)."""
+    key = corrections.key_of
+    # An AI change to a word the corrections file had already replaced counts from the original word.
+    was = {key(h["replacement"]): key(h["original"]) for h in ctx.get("auto_corrections") or []}
+    ai_pairs, ai_from = set(), set()
+    for c in ctx.get("ai_changes") or []:
+        for origin in {key(c["from"]), was.get(key(c["from"]))} - {None}:
+            ai_pairs.add((origin, key(c["to"])))
+            ai_from.add(origin)
+    sources = {}
+    for wrong, correct in pairs:
+        kw, kc = key(wrong), key(correct)
+        sources[(wrong, correct)] = ("AI" if (kw, kc) in ai_pairs else
+                                     "AI+User" if kw in ai_from else "User")
+    approved_words = f" {key(approved)} "
+    learnt_from = {key(w) for w, _ in pairs}
+    rejected = [c for c in ctx.get("ai_changes") or []
+                if not ({key(c["from"]), was.get(key(c["from"]))} & learnt_from)
+                and f" {key(c['to'])} " not in approved_words]
+    return sources, rejected
+
+
 def record_approval(ctx: dict, approved_text: str) -> list[dict]:
     """After an approved transcript is timed: save the draft, the approved text and their word
     diff in the job folder, and add the fixes to corrections.md. Approving the same job again
@@ -1079,15 +1173,26 @@ def record_approval(ctx: dict, approved_text: str) -> list[dict]:
         return []
     (job_dir / "approved-text.txt").write_text(approved_text.strip() + "\n", encoding="utf-8")
     diff = corrections.diff_lines(draft, approved_text)
+    learnt = corrections.learnable(diff)
+    sources, rejected = _sources(ctx, learnt, approved_text)
+    rejected_md = "".join(f"- “{c['from']}” → “{c['to']}” (undone, not learnt)\n" for c in rejected)
     (job_dir / "corrections-diff.md").write_text(
         f"# Whisper's draft vs the approved text\n\nTable: {ctx['corrections_table']}\n\n"
-        + corrections.diff_markdown(diff), encoding="utf-8")
+        + corrections.diff_markdown(diff)
+        + "".join(f"- learnt “{w}” → “{c}” (source: {sources[(w, c)]})\n" for w, c in learnt)
+        + (f"\n## AI fixes you rejected\n\n{rejected_md}" if rejected else ""), encoding="utf-8")
     (job_dir / "corrections-diff.json").write_text(json.dumps(
         {"table": ctx["corrections_table"], "whisper_draft": draft, "approved": approved_text,
-         "auto_corrections": ctx.get("auto_corrections", []), "diff": diff},
-        indent=2, ensure_ascii=False), encoding="utf-8")
-    pairs = Counter(corrections.learnable(diff))
-    new = list((pairs - Counter(ctx["recorded_pairs"])).elements())
+         "auto_corrections": ctx.get("auto_corrections", []), "ai_changes": ctx.get("ai_changes", []),
+         "diff": diff, "learnt": [{"wrong": w, "correct": c, "source": sources[(w, c)]} for w, c in learnt],
+         "ai_rejected": rejected}, indent=2, ensure_ascii=False), encoding="utf-8")
+    if rejected:
+        (job_dir / "ai-rejected.json").write_text(json.dumps(rejected, indent=1, ensure_ascii=False),
+                                                  encoding="utf-8")
+        log.info("AI fixes undone by the user (not learnt): %s",
+                 ", ".join(f"{c['from']} -> {c['to']}" for c in rejected))
+    pairs = Counter(learnt)
+    new = [(w, c, sources[(w, c)]) for w, c in (pairs - Counter(ctx["recorded_pairs"])).elements()]
     ctx["recorded_pairs"] = dict(pairs | Counter(ctx["recorded_pairs"]))
     try:
         changed = corrections.record(DATA_DIR, ctx["corrections_table"], new)
@@ -1095,7 +1200,8 @@ def record_approval(ctx: dict, approved_text: str) -> list[dict]:
         log.warning("corrections.md has errors, nothing was added: %s", e)
         return []
     log.info("Corrections recorded (%s): %s", ctx["corrections_table"],
-             ", ".join(f"{c['wrong']} -> {c['correct']} ({c['change']})" for c in changed) or "none")
+             ", ".join(f"{c['wrong']} -> {c['correct']} ({c['source']}, {c['change']})" for c in changed)
+             or "none")
     return changed
 
 
@@ -1230,6 +1336,7 @@ def align_and_write(ctx: dict, lyrics_text: str, strip_tags: bool = True,
             "transcribe_engine": ctx.get("engine"),
             "quality": ctx.get("quality"),
             "review_highlights": len(ctx.get("review_marks") or []),
+            "ai_polish": ctx.get("ai_polish"),  # provider, model and runs; never the key
             "separator_engine": config.SEPARATOR_ENGINE if isolated else None,
             "separator_model": config.SEPARATOR_MODEL if isolated else None,
             "duration_seconds": round(ctx["duration"], 2),
