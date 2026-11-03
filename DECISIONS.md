@@ -364,6 +364,19 @@ Recorded 2026-07-15 from Aman's answers.
     - another Mac (the collaborator's)
     - the "update available" state's screenshot (the screenshots come from a checkout, which shows the GitHub path)
 
+## V4.5.1 — The window always talks to this version's server (2026-11-03)
+
+- **Bug:** on a collaborator's Mac, 4.5 reported 4.5 but showed the 4.1 screen (top tabs, no sidebar), although the published zip is correct. The 4.1 UI takes its footer version from `/api/meta`, so a 4.5 server can answer while a 4.1 page is on screen. That can come from an old copy of the app or its server still running, or from a cached page. We couldn't test on that Mac, so 4.5.1 guards against every path:
+  - **Server on the port** (`launcher.free_the_port`): before starting its server, the launcher asks anything listening on the port for `/api/meta`. If it answers with another version and its process (`lsof`) is a copy of this app (`launcher.py`, `app.py` or "SRT Generator" in its command line), the launcher stops it with SIGTERM, then SIGKILL. Anything else, or a process that won't stop, keeps the port, and this version takes a free port instead (the window URL and `app.lock` follow it). 4.5 just refused with "port in use".
+  - **Old app still open** (`claim_single_instance`): `app.lock` now holds "pid port". If another copy holds the lock and its server answers with a different version, that process is stopped and this one takes over. The same version is focused as before. This also fixes the focus request, which 4.5 sent to `/?v=4.5/api/focus`.
+  - **Page check** (`App.jsx`): Vite bakes `VERSION` into the bundle (`__BUILD_VERSION__`). If `/api/meta` reports another version, the page deletes Cache Storage and reloads once from `/?v=<server version>&r=<time>`; a sessionStorage flag stops a loop. The 4.5 versioned URL and cache clearing stay.
+- **Fix automatically left a short cue.** A cue lengthened to exactly 0.3 s measured 0.2999… s in floating point and stayed flagged, for about 40% of start times. Cue lengths are now compared to the millisecond. V4.5 recorded "no issues left" from an earlier run; the final 4.5 run in fact still showed one short cue.
+- **Verified 2026-11-03:**
+  - **Stale server:** the published 4.1 build's server was left running on 7860 (`/api/meta` → 4.1), then 4.5.1 was installed and opened. The log reads "port 7860 is in use (answers as version 4.1)" → "stopping the server of version 4.1: stopped" → "server 4.5.1 on port 7860". The window loaded `v=4.5.1`, and a screenshot shows the sidebar UI with v4.5.1.
+  - **Old copy still open:** a stand-in 4.1 process held `app.lock` (pid only, as 4.1 writes it) and served 4.1. Opening 4.5.1 stopped it and took over the lock and the port. A second launch of 4.5.1 left the running copy alone (same pid, one launcher).
+  - **Page check:** a server reporting 9.9 with the 4.5.1 bundle reloaded the page once (`v=old` → `v=9.9&r=…`) and stopped there; with matching versions there was no reload.
+  - **Regression:** unit tests and the v4.5 Review/Updates UI suite pass (Fix automatically: no issues).
+
 ## Hard rules (per brief, as amended by Aman)
 
 No Docker, no databases, no Electron, no cloud calls at runtime (owner-approved exceptions: the V3.6 GitHub update check, now Windows/checkouts only, and Sparkle's daily appcast check on Mac, V4.0, and the one-time Hinglish model download, V4.2; plus the opt-in AI polish, V4.3, which sends transcript text only to a provider the user picks and pays for, and is off until a key is added), no paid APIs (except that opt-in), no accounts, no telemetry. App must run without any coding agent present. (The brief's original "Python + Gradio only, no React" rule was lifted by Aman for V3.)

@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -46,37 +47,98 @@ from pipeline import ACCEPTED_EXTENSIONS  # noqa: E402
 
 VERSION = (APP_DIR / "VERSION").read_text(encoding="utf-8").strip()
 LOCAL_HOST = "127.0.0.1" if config.HOST in ("0.0.0.0", "") else config.HOST
-URL = f"http://{LOCAL_HOST}:{config.PORT}/?v={VERSION}"  # a new version never matches a cached page
+port = config.PORT  # moves to a free port if something else holds config.PORT (start_server)
 LAST_RUN = SUPPORT / "last-run-version"
 OLD_APP_OFFERED = SUPPORT / "old-app-offered"
 _updates = {}  # the Sparkle backend, once started
 
 
-def claim_single_instance():
-    """Hold an exclusive lock for the app's lifetime; if another copy holds it, focus that one."""
-    lock = open(SUPPORT / "app.lock", "a+")
+def base_url(at: int | None = None) -> str:
+    return f"http://{LOCAL_HOST}:{at or port}"
+
+
+def page_url() -> str:
+    return f"{base_url()}/?v={VERSION}"  # a new version never matches a cached page
+
+
+def server_version(at: int) -> str | None:
+    """The version a server on this port reports in /api/meta: None if nothing answers like this
+    app does ("?" if it answers without a version)."""
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        lock.seek(0)
-        pid = lock.read().strip()
+        with urllib.request.urlopen(base_url(at) + "/api/meta", timeout=2) as r:
+            return str(json.loads(r.read()).get("version") or "?")
+    except Exception:
+        return None
+
+
+def listener_pids(at: int) -> list[int]:
+    out = subprocess.run(["/usr/sbin/lsof", "-nP", f"-iTCP:{at}", "-sTCP:LISTEN", "-t"],
+                         capture_output=True, text=True).stdout
+    return [int(x) for x in out.split() if x.isdigit() and int(x) != os.getpid()]
+
+
+def is_ours(pid: int) -> bool:
+    """A copy of this app (any version): the .app's launcher or a checkout's app.py."""
+    cmd = subprocess.run(["/bin/ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
+    return "launcher.py" in cmd or "app.py" in cmd or "SRT Generator" in cmd
+
+
+def stop(pid: int) -> bool:
+    for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, 3)):
         try:
-            from AppKit import NSApplicationActivateAllWindows, NSRunningApplication
-            other = NSRunningApplication.runningApplicationWithProcessIdentifier_(int(pid))
-            if other:
-                other.activateWithOptions_(NSApplicationActivateAllWindows)
-        except Exception:
-            pass
-        try:  # also un-minimizes the window once the UI is running
-            urllib.request.urlopen(urllib.request.Request(URL + "/api/focus", method="POST"), timeout=2)
-        except Exception:
-            pass
-        sys.exit(0)
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        for _ in range(wait * 10):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            time.sleep(0.1)
+    return False
+
+
+def claim_single_instance():
+    """Hold an exclusive lock for the app's lifetime; if another copy holds it, focus that one —
+    unless it is another version (an old copy still running after an update): stop it, take over."""
+    lock = open(SUPPORT / "app.lock", "a+")
+    for attempt in range(2):
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            lock.seek(0)
+            pid, _, other_port = lock.read().strip().partition(" ")  # "pid port" (before 4.5.1: "pid")
+            other_port = int(other_port) if other_port.isdigit() else config.PORT
+            running = server_version(other_port)
+            if attempt == 0 and running not in (None, VERSION) and pid.isdigit() and is_ours(int(pid)):
+                log_line(f"version {running} is still running (pid {pid}); stopping it")
+                if stop(int(pid)):
+                    continue
+            try:
+                from AppKit import NSApplicationActivateAllWindows, NSRunningApplication
+                other = NSRunningApplication.runningApplicationWithProcessIdentifier_(int(pid))
+                if other:
+                    other.activateWithOptions_(NSApplicationActivateAllWindows)
+            except Exception:
+                pass
+            try:  # also un-minimizes the window once the UI is running
+                urllib.request.urlopen(urllib.request.Request(base_url(other_port) + "/api/focus", method="POST"),
+                                       timeout=2)
+            except Exception:
+                pass
+            sys.exit(0)
+    write_lock(lock)
+    return lock
+
+
+def write_lock(lock):
     lock.seek(0)
     lock.truncate()
-    lock.write(str(os.getpid()))
+    lock.write(f"{os.getpid()} {port}")
     lock.flush()
-    return lock
 
 
 def log_line(message: str):
@@ -199,7 +261,7 @@ def needs_setup() -> bool:
 def port_in_use() -> bool:
     with socket.socket() as s:
         s.settimeout(0.5)
-        return s.connect_ex((LOCAL_HOST, config.PORT)) == 0
+        return s.connect_ex((LOCAL_HOST, port)) == 0
 
 
 class Api:
@@ -225,6 +287,7 @@ class Shell:
         self.proc = None
         self.server = None
         self.updater_started = False
+        self.lock = None  # app.lock, rewritten with the port once the server runs
         self.hinglish_answer = threading.Event()
         self.hinglish_now = False
 
@@ -304,23 +367,47 @@ class Shell:
             time.sleep(3)
 
     def start_server(self) -> bool:
-        if port_in_use():
-            return self.fail(
-                f"Port {config.PORT} is already in use. If the app is open in a browser "
-                "(Start.command), close that Terminal window, then click Try again.")
+        if not self.free_the_port():
+            return False
         import uvicorn
         import app as server
 
         server.on_focus_request = self.focus
         server.update_backend = _updates.get("backend")
-        self.server = uvicorn.Server(uvicorn.Config(server.app, host=config.HOST, port=config.PORT,
+        self.server = uvicorn.Server(uvicorn.Config(server.app, host=config.HOST, port=port,
                                                     log_level="warning"))
         threading.Thread(target=self.server.run, daemon=True).start()
         for _ in range(300):
             if self.server.started:
+                write_lock(self.lock)
+                log_line(f"server {VERSION} on port {port}")
                 return True
             time.sleep(0.1)
         return self.fail("The app's local server didn't start. Click Try again.")
+
+    def free_the_port(self) -> bool:
+        """Something already answers on the port: another version of this app's server (say, left
+        running by an earlier version) is stopped; anything else, or one that won't stop, keeps
+        the port and this version moves to a free one. Either way the window only ever talks to
+        this version's own server."""
+        global port
+        if not port_in_use():
+            return True
+        running = server_version(port)
+        log_line(f"port {port} is in use (answers as version {running})")
+        for pid in listener_pids(port):
+            if running not in (None, VERSION) and is_ours(pid):
+                log_line(f"stopping the server of version {running} (pid {pid})"
+                         f": {'stopped' if stop(pid) else 'would not stop'}")
+        for _ in range(30):
+            if not port_in_use():
+                return True
+            time.sleep(0.1)
+        with socket.socket() as s:
+            s.bind((LOCAL_HOST, 0))
+            port = s.getsockname()[1]
+        log_line(f"using port {port} instead")
+        return True
 
     def run(self):
         if not self.updater_started:
@@ -335,7 +422,7 @@ class Shell:
         if self.server is None and not self.start_server():
             return
         clear_web_cache_if_updated()
-        self.window.load_url(URL)
+        self.window.load_url(page_url())
         self.offer_to_trash_old_app()
 
     def open_updates_page(self):
@@ -373,10 +460,11 @@ class Shell:
 
 def main():
     SUPPORT.mkdir(parents=True, exist_ok=True)
-    lock = claim_single_instance()  # noqa: F841 — held open until exit
+    lock = claim_single_instance()
     trash_old_app()
     patch_file_picker()
     shell = Shell()
+    shell.lock = lock
     webview.settings["ALLOW_DOWNLOADS"] = True
     shell.window = webview.create_window(
         "SRT Generator", html=(RESOURCES / "progress.html").read_text(encoding="utf-8"),

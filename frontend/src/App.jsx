@@ -55,10 +55,30 @@ function useTheme() {
   return [theme, () => setTheme(t => (t === "light" ? "dark" : "light"))];
 }
 
+/** A page built for another version than the server's came from a cache: clear the caches and
+    reload once from a fresh URL (the session flag stops a reload loop if that doesn't help). */
+async function reloadIfStale(serverVersion) {
+  const flag = "srt-stale-reload";
+  if (!serverVersion || serverVersion === __BUILD_VERSION__) {
+    try { sessionStorage.removeItem(flag); } catch {}
+    return false;
+  }
+  try {
+    if (sessionStorage.getItem(flag) === serverVersion) return false;
+    sessionStorage.setItem(flag, serverVersion);
+  } catch { return false; }
+  try { if (window.caches) for (const k of await caches.keys()) await caches.delete(k); } catch {}
+  location.replace(`/?v=${encodeURIComponent(serverVersion)}&r=${Date.now()}`);
+  return true;
+}
+
 /** /api/meta: languages, scripts, section presets, version. */
 function useMeta() {
   const [meta, setMeta] = useState(null);
-  useEffect(() => { fetch("/api/meta").then(r => r.json()).then(setMeta).catch(() => {}); }, []);
+  useEffect(() => {
+    fetch("/api/meta", { cache: "no-store" }).then(r => r.json())
+      .then(async m => { if (!(await reloadIfStale(m.version))) setMeta(m); }).catch(() => {});
+  }, []);
   return meta;
 }
 
