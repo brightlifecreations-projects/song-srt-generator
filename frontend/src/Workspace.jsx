@@ -137,7 +137,7 @@ function saveDecks(d) {
 
 /** One processing card: small live stage label + one rotating quip line
     that runs for the whole job, so every easter egg gets airtime. */
-function ProcessingCard({ steps, stage, elapsed }) {
+function ProcessingCard({ steps, stage, elapsed, message, progress }) {
   const [line, setLine] = useState({ text: "Warming up…", tier: "normal" });
 
   useEffect(() => {
@@ -202,6 +202,13 @@ function ProcessingCard({ steps, stage, elapsed }) {
         </div>
         <span className="proc-time">{elapsed.toFixed(0)}s</span>
       </div>
+      {message && <p className="proc-detail">{message}</p>}
+      {progress != null && (
+        <div className="proc-progress" role="progressbar" aria-valuenow={Math.round(progress * 100)}
+          aria-valuemin={0} aria-valuemax={100}>
+          <i style={{ width: `${Math.round(progress * 100)}%` }} />
+        </div>
+      )}
       <div className="proc-quip">
         <AnimatePresence mode="wait">
           <motion.span
@@ -294,6 +301,31 @@ function useElapsed(running) {
   return elapsed;
 }
 
+/** The Hinglish model's download state (/api/hinglish-model), polled while it downloads.
+    start() is the "Download now" button. */
+function useHinglishModel(wanted) {
+  const [model, setModel] = useState(null);
+  useEffect(() => {
+    if (!wanted) return;
+    let timer, stopped = false;
+    const check = async () => {
+      try {
+        const m = await (await fetch("/api/hinglish-model")).json();
+        if (stopped) return;
+        setModel(m);
+        if (m.state === "downloading") timer = setTimeout(check, 700);
+      } catch { /* server busy */ }
+    };
+    check();
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [wanted, model?.state === "downloading"]);
+  async function start() {
+    const m = await (await fetch("/api/hinglish-model/download", { method: "POST" })).json();
+    setModel(m);
+  }
+  return [model, start];
+}
+
 /** One section's whole workbench (Song, Drama or Reels/YouTube). Every tab stays mounted, so
     each keeps its own file, draft and result; its settings are remembered per section. */
 export default function Workspace({ section, preset, meta, active }) {
@@ -304,6 +336,8 @@ export default function Workspace({ section, preset, meta, active }) {
   const [lyricsLanguage, setLyricsLanguage] = useTabSetting(section, "language", "");
   const [transcribeLanguage, setTranscribeLanguage] = useTabSetting(section, "language-transcribe", "");
   const [scriptPick, setScriptPick] = useTabSetting(section, "script", AUTO_SCRIPT);
+  const [quality, setQuality] = useTabSetting(section, "quality", "");
+  const [topicWords, setTopicWords] = useState("");
   const [file, setFile] = useState(null);
   const [fileError, setFileError] = useState("");
   const [lyrics, setLyrics] = useState("");
@@ -336,6 +370,11 @@ export default function Workspace({ section, preset, meta, active }) {
     ? (known(transcribeLanguage) ? transcribeLanguage : meta?.transcribe_language_default || "auto")
     : (known(lyricsLanguage) ? lyricsLanguage : meta?.language_default || "en");
   const setLanguage = transcribing ? setTranscribeLanguage : setLyricsLanguage;
+  // Hinglish drafts use the Hinglish model; "Automatic" becomes Hinglish for Hindi/Urdu audio.
+  const maybeHinglish = transcribing && (scriptPick === "hinglish" ||
+    (scriptPick === AUTO_SCRIPT && ["auto", "hi", "ur", "hinglish"].includes(language)));
+  const speed = quality === "fast" || quality === "accurate" ? quality : meta?.quality_default || "accurate";
+  const [hinglishModel, downloadModel] = useHinglishModel(active && maybeHinglish);
 
   useEffect(() => () => clearInterval(pollRef.current), []);
 
@@ -417,15 +456,21 @@ export default function Workspace({ section, preset, meta, active }) {
     setJob(null);
     setDraft(null);
     setMarks([]);
-    submit("/api/transcribe", { ...fileFields(), language, script: scriptPick }, s => {
+    submit("/api/transcribe", {
+      ...fileFields(), language, script: scriptPick, quality: speed, topic_words: topicWords,
+    }, s => {
       if (s.status !== "draft") { setPhase(s.status); return; }
       setLyrics(s.draft_text || "");
-      setMarks((s.auto_corrections || []).map((h, i) => ({ ...h, id: `m${i}` })));
+      setMarks([
+        ...(s.auto_corrections || []).map((h, i) => ({ ...h, kind: "auto", id: `m${i}` })),
+        ...(s.review_marks || []).map((h, i) => ({ ...h, id: `r${i}` })),
+      ]);
       setDraft({
         language: s.detected_language_name, note: s.script_note, script: s.script,
         approximate: s.approximate_timing, pickedWith: scriptPick,
         corrected: (s.auto_corrections || []).length, table: s.corrections_table,
-        hotwords: s.hotwords,
+        hotwords: s.hotwords, engine: s.engine, quality: s.quality,
+        review: (s.review_marks || []).length,
       });
       setPhase("draft");
     });
@@ -451,10 +496,14 @@ export default function Workspace({ section, preset, meta, active }) {
     if (transcribing) setLyrics("");
   }
 
-  /** Put a replaced word back the way Whisper wrote it. */
+  /** Put a replaced word back the way Whisper wrote it (or take the second opinion's word). */
   function undoMark(mark) {
     const live = liveMarks(lyrics, marks).find(m => m.id === mark.id);
     if (live) setLyrics(lyrics.slice(0, live.at.from) + mark.original + lyrics.slice(live.at.to));
+    setMarks(ms => ms.filter(m => m.id !== mark.id));
+  }
+  /** A highlighted word is fine as it is: drop the highlight. */
+  function keepMark(mark) {
     setMarks(ms => ms.filter(m => m.id !== mark.id));
   }
 
@@ -473,6 +522,8 @@ export default function Workspace({ section, preset, meta, active }) {
     pickAudio(f);
   }
 
+  const live = liveMarks(lyrics, marks);
+  const toCheck = live.filter(m => m.kind && m.kind !== "auto").length;
   const steps = job?.steps || DEFAULT_STEPS;
   const stageIdx = job?.stage ? job.stage - 1 : 0;
   const cues = phase === "done" ? job?.cues || [] : [];
@@ -590,16 +641,28 @@ export default function Workspace({ section, preset, meta, active }) {
                 <b>{draft.corrected} {draft.corrected === 1 ? "word" : "words"} auto-corrected</b> from your
                 corrections file ({draft.table}). They're highlighted — hover one to see what Whisper
                 wrote, and undo it if it's wrong.
-                {liveMarks(lyrics, marks).length !== draft.corrected &&
-                  ` ${liveMarks(lyrics, marks).length} still in the text.`}
+                {live.filter(m => m.kind === "auto").length !== draft.corrected &&
+                  ` ${live.filter(m => m.kind === "auto").length} still in the text.`}
               </p>
             )}
+            {transcribing && hasDraft && draft.review > 0 && (
+              <p className="autofix-note" data-testid="review-count">
+                <b className="check">{toCheck} {toCheck === 1 ? "word" : "words"} to check</b>
+                {draft.quality === "accurate"
+                  ? " — the second opinion heard something else, or the model wasn't sure. "
+                  : " — the model wasn't sure of them. "}
+                Hover one to see why; <i>Keep</i> removes its highlight.
+              </p>
+            )}
+            {transcribing && hasDraft && (job?.warnings || []).map(w => <div key={w} className="warnbox draft-note">{w}</div>)}
             {transcribing && hasDraft && draft.note && <div className="warnbox draft-note">{draft.note}</div>}
             <DraftEditor
               value={lyrics}
               onChange={setLyrics}
               marks={transcribing && hasDraft ? marks : []}
               onUndo={undoMark}
+              onUse={undoMark}
+              onKeep={keepMark}
               placeholder={transcribing ? DRAFT_PLACEHOLDER : LYRICS_PLACEHOLDER[section]}
               readOnly={transcribing && !hasDraft}
             />
@@ -659,6 +722,45 @@ export default function Workspace({ section, preset, meta, active }) {
                 {hasDraft && draft.pickedWith !== scriptPick && "Transcribe again to use this script; approving keeps the current draft's."}
               </p>
             )}
+            {maybeHinglish && (
+              <div className="speedpick">
+                <span className="langpick-label">Hinglish speed</span>
+                <div className="segmented small" role="radiogroup" aria-label="Hinglish speed">
+                  {[["fast", "Fast", "One pass"], ["accurate", "Accurate", "Second opinion + re-check"]].map(([code, title, hint]) => (
+                    <button key={code} role="radio" aria-checked={speed === code}
+                      className={`segment${speed === code ? " on" : ""}`}
+                      onClick={() => setQuality(code)} disabled={working}>
+                      <span><b>{title}</b><span>{hint}</span></span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {maybeHinglish && hinglishModel && hinglishModel.state !== "installed" && (
+              <div className="modelnote" data-testid="hinglish-model">
+                {hinglishModel.state === "downloading" ? (
+                  <>
+                    Downloading the Hinglish model — {Math.round(hinglishModel.done_mb)} of {Math.round(hinglishModel.total_mb || hinglishModel.size_mb)} MB
+                    <div className="proc-progress"><i style={{ width: `${Math.min(100, (hinglishModel.done_mb / (hinglishModel.total_mb || hinglishModel.size_mb || 1)) * 100)}%` }} /></div>
+                  </>
+                ) : (
+                  <>
+                    {hinglishModel.state === "error" && <><b>{hinglishModel.error}</b><br /></>}
+                    The Hinglish model ({hinglishModel.size_mb} MB) downloads once, the first time you
+                    transcribe Hinglish; after that it works offline.{" "}
+                    <button className="loadtxt" onClick={downloadModel}>Download now</button>
+                  </>
+                )}
+              </div>
+            )}
+            {transcribing && (
+              <label className="topicwords">
+                <span className="langpick-label">Topic words <span className="muted">(optional)</span></span>
+                <input value={topicWords} onChange={e => setTopicWords(e.target.value)} disabled={working}
+                  placeholder="Names, brands, terms — e.g. Lovika, reel, laptop, client" />
+                <span className="lang-note">Whisper is told to expect these, along with your corrections.</span>
+              </label>
+            )}
 
             <button className="go" disabled={!ready} onClick={goAction}>
               {working ? "Working…" : goLabel}
@@ -708,7 +810,8 @@ export default function Workspace({ section, preset, meta, active }) {
                 exit={{ opacity: 0, y: -8 }}
                 transition={{ duration: 0.3 }}
               >
-                <ProcessingCard steps={steps} stage={stageIdx} elapsed={elapsed} />
+                <ProcessingCard steps={steps} stage={stageIdx} elapsed={elapsed}
+                  message={job?.status === "running" ? job?.message : null} progress={job?.progress} />
               </motion.div>
             )}
           </AnimatePresence>

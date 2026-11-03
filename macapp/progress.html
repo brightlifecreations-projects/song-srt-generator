@@ -68,6 +68,15 @@
   .failed .error { display: block; }
   .failed .actions { display: flex; }
   .idle .bar i { animation: none; display: none; }
+  .offer {
+    display: none; margin: -8px 0 18px; padding: 14px 16px; border-radius: 10px;
+    border: 1px solid var(--accent); background: var(--accent-soft); color: var(--ink-soft);
+  }
+  .offer p { margin: 0 0 12px; }
+  .offer b { color: var(--ink); }
+  .offer-actions { display: flex; gap: 10px; }
+  .offering .offer { display: block; }
+  .offering .bar i { animation: none; display: none; }
 </style>
 </head>
 <body class="idle">
@@ -78,7 +87,16 @@
   <ol id="steps">
     <li data-step="1"><span class="num">1</span><span><b>Install the app's Python packages</b><span class="detail"></span></span></li>
     <li data-step="2"><span class="num">2</span><span><b>Download the AI models and do a test run</b><span class="detail"></span></span></li>
+    <li data-step="3" id="hinglish-step" hidden><span class="num">3</span><span><b>Hinglish model (optional)</b><span class="detail"></span></span></li>
   </ol>
+  <div class="offer" id="offer">
+    <p><b>Hinglish speech model — download it now?</b> It writes Hindi speech straight in Roman letters.
+      It's about <span id="offer-mb"></span> MB. If you skip it, it downloads the first time you transcribe Hinglish.</p>
+    <div class="offer-actions">
+      <button class="primary" onclick="choose(true)">Download now</button>
+      <button onclick="choose(false)">Later</button>
+    </div>
+  </div>
   <div class="bar"><i></i></div>
   <div class="log" id="log"></div>
   <div class="error" id="error"></div>
@@ -109,9 +127,20 @@
         li.querySelector(".detail").textContent = detail;
       }
     });
-    if (n > 2) { $("title").textContent = label; $("log").textContent = detail; document.body.className = "idle"; }
+    if (n === 3) $("hinglish-step").hidden = false;
+    if (n > 3) { $("title").textContent = label; $("log").textContent = detail; document.body.className = "idle"; }
   }
   function logLine(line) { $("log").textContent = line; }
+  function offerHinglish(mb) {
+    $("offer-mb").textContent = mb;
+    document.querySelectorAll("#steps li").forEach(li => { if (Number(li.dataset.step) < 3) { li.className = "done"; li.querySelector(".num").textContent = "✓"; } });
+    $("log").textContent = "";
+    document.body.className = "offering";
+  }
+  function choose(now) {
+    document.body.className = "";
+    pywebview.api.hinglish_choice(now);
+  }
   function fail(message) {
     document.body.className = "failed";
     $("error").textContent = message + " If it keeps failing, send Aman the log (Show the log).";

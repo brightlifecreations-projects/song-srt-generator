@@ -6,7 +6,8 @@ the bundle) and SRT_DATA_DIR (~/Library/Application Support/SRT Generator).
 1. One instance only: a second launch brings the running window forward and exits.
 2. First launch, or the first launch after an update: install the pinned packages
    and run warmup.py to PASS, with progress shown in the window. Models live in the
-   data folder, so updates never download them again.
+   data folder, so updates never download them again. Then, once, offer the optional
+   Hinglish model download (V4.2); otherwise it downloads the first time Hinglish is used.
 3. Run the FastAPI server on a thread and load the UI into the same native window.
    Closing the window quits the app, which stops the server.
 4. Start Sparkle (updater.py): a daily update check and "Check for Updates…" in the app menu.
@@ -161,6 +162,10 @@ class Api:
     def __init__(self, shell):
         self._shell = shell
 
+    def hinglish_choice(self, now):
+        self._shell.hinglish_now = bool(now)
+        self._shell.hinglish_answer.set()
+
     def retry(self):
         threading.Thread(target=self._shell.run, daemon=True).start()
 
@@ -174,6 +179,8 @@ class Shell:
         self.proc = None
         self.server = None
         self.updater_started = False
+        self.hinglish_answer = threading.Event()
+        self.hinglish_now = False
 
     def ui(self, fn, *args):
         self.window.evaluate_js(f"{fn}({', '.join(json.dumps(a) for a in args)})")
@@ -222,10 +229,33 @@ class Shell:
         if not self.stream([sys.executable, str(APP_DIR / "warmup.py")]):
             return self.fail("The test run didn't pass. Check your internet connection and try again.")
 
+        try:
+            offered = json.loads(STAMP.read_text(encoding="utf-8")).get("hinglish_offered", False)
+        except (OSError, ValueError):
+            offered = False
+        if not offered:
+            self.offer_hinglish_model()
         STAMP.write_text(json.dumps({"version": VERSION, "requirements": requirements_hash(),
-                                     "installed": time.strftime("%Y-%m-%d %H:%M:%S")}), encoding="utf-8")
-        self.ui("step", 3, "PASS — all set", "Opening the app…")
+                                     "installed": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                     "hinglish_offered": True}), encoding="utf-8")
+        self.ui("step", 4, "PASS — all set", "Opening the app…")
         return True
+
+    def offer_hinglish_model(self):
+        """Optional: download the Hinglish model now instead of on first use. Never fails setup."""
+        import hinglish_model
+        if hinglish_model.installed():
+            return
+        self.hinglish_answer.clear()
+        self.ui("offerHinglish", config.HINGLISH_MODEL_MB)
+        self.hinglish_answer.wait()
+        if not self.hinglish_now:
+            return
+        self.ui("step", 3, "Downloading the Hinglish model",
+                f"About {config.HINGLISH_MODEL_MB} MB, once. Hinglish then works offline.")
+        if not self.stream([sys.executable, str(APP_DIR / "hinglish_model.py"), "download"]):
+            self.ui("logLine", "Couldn't download it now — it downloads the first time you use Hinglish.")
+            time.sleep(3)
 
     def start_server(self) -> bool:
         if port_in_use():

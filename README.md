@@ -43,7 +43,7 @@ Building releases from this repo: `./make_release.sh <version>` builds the Mac a
 6. Pick the **language**: Auto-detect, English, Hindi, Hinglish, Spanish, Portuguese, French, German, Italian, Punjabi or Urdu. Each mode remembers its last choice (lyrics mode starts on English, transcribe mode on Auto-detect). The Hindi/Urdu sentence marks (। ॥ ۔ ، ؟) end a subtitle just like a comma or full stop, and a Spanish `¿` or `¡` starts a new one.
 7. Then:
    - **Lyrics/script mode:** paste the words exactly as sung or spoken (one line becomes one subtitle, write out every repeated chorus in full; **Load .txt** fills the box) and click **Generate SRT**.
-   - **Transcribe mode:** pick the **Lyrics script** (below), then click **Transcribe**. The draft appears in the box, one line per phrase, with the language Whisper detected. Play the audio, fix any wrong words, and click **Approve & generate SRT**. The approved text is timed against the same audio (a song's vocals are isolated only once). Spotted a mistake afterwards? Edit and approve again.
+   - **Transcribe mode:** pick the **Lyrics script** (below), optionally type **Topic words** — names, brands and terms in the file (e.g. *Lovika, reel, laptop, client*) — then click **Transcribe**. The draft appears in the box, one line per phrase, with the language Whisper detected. Play the audio, fix any wrong words, and click **Approve & generate SRT**. The approved text is timed against the same audio (a song's vocals are isolated only once). Spotted a mistake afterwards? Edit and approve again.
 8. Download the SRT (and, when the voice was isolated, the isolated vocal/dialogue stem as a bonus).
 
 **Speaker turns (Drama):** there's no speaker recognition (that would need an online account for its model). Turns come from the text: put each speaker's line on its own line in the script, or correct the draft that way; a pause in the audio also starts a new subtitle.
@@ -55,12 +55,23 @@ Building releases from this repo: `./make_release.sh <version>` builds the Mac a
 | Option | What you get | Subtitle timing |
 |---|---|---|
 | Same as audio | Whatever script Whisper writes for the detected language (Hindi songs often come out in Urdu script, because Hindi and Urdu sound the same to Whisper) | Aligned to the audio |
-| **Hinglish** | Hindi in everyday Roman letters ("kabhi kabhi zindagi mein"): Whisper transcribes in Hindi, then the app converts it offline. English words stay as they are | Aligned to the audio |
+| **Hinglish** | Hindi in everyday Roman letters ("kabhi kabhi zindagi mein"), written directly by a dedicated Hinglish speech model (see [Hinglish](#hinglish)). English words stay as they are | Aligned to the audio |
 | Hindi (Devanagari) | Hindi script; any Urdu-script words are converted (roughly — check them) | Aligned to the audio |
 | Urdu script | Urdu script | Aligned to the audio |
 | English translation | Whisper's English translation | **Approximate**: translated words can't be matched to the audio word by word, so subtitles follow Whisper's phrase timings (still within the character caps and 7 seconds) |
 
 Until you pick one, it's **Automatic**: Hindi or Urdu audio is written as Hinglish, anything else in its own script. Your pick is remembered. Changing it after a draft needs a new transcription. In lyrics mode, Hinglish works as before: paste Roman-script lyrics and choose **Hinglish** in the Language dropdown.
+
+## Hinglish
+
+**Since 4.2, Hinglish drafts come from a Hinglish speech model**: Oriserve's [Whisper-Hindi2Hinglish-Apex](https://huggingface.co/Oriserve/Whisper-Hindi2Hinglish-Apex) (Apache-2.0, fine-tuned from Whisper large-v3-turbo), converted to run fast on the CPU. It writes Hindi speech straight in Roman letters, instead of the old Hindi → Devanagari → Roman letters chain, and is far quicker: a 17-second reel takes about 8 seconds instead of minutes.
+
+- **Downloaded once (781 MB), then offline.** It downloads the first time you transcribe Hinglish, with a progress bar. To get it ahead of time: click **Download now** under the script picker in Transcribe mode, or say yes when setup offers it (the Mac app's setup window, `Install.command`, `Install.bat`). It's kept in the data folder's `models/`, from this project's [GitHub releases](https://github.com/brightlifecreations-projects/song-srt-generator/releases/tag/model-hinglish-apex-int8-v1) with the licence and a NOTICE crediting Oriserve. If it can't be downloaded (no internet), the draft is made the old way and says so.
+- **Hinglish speed: Fast or Accurate** (Transcribe mode, remembered per tab; Accurate is the default). *Fast* is one pass of the Hinglish model. *Accurate* also asks the standard model for a second opinion (Whisper medium in Hindi, turned into Roman letters) and highlights every word where the two disagree. It then re-transcribes short doubtful stretches on their own, and keeps the re-check only when it is clearly more confident. Accurate takes a few times longer (a 17-second reel: about 45 seconds instead of 8).
+- **Words to check are highlighted** in the draft, the same way as auto-corrections: where the second opinion heard something else, or where the model itself wasn't sure. Hover one to see why. **Use “…”** takes the second opinion's word, **Undo** puts back a re-checked word, and **Keep** removes the highlight.
+- **House spellings.** Every Hinglish draft is written with your house spellings (*nahin* → *nahi*, *chaahie* → *chahiye*, *hamen* → *humein*, *yah* → *yeh*, *vaala* → *wala*, …) before your corrections file is applied. The built-in table is in the **Corrections** tab: switch rows on or off, edit them, add your own, or **Restore defaults**. Edits are saved as `hinglish-spellings.md` in the data folder. *to* → *toh* is there but off, because "to" is also an English word; switch it on if your speakers rarely use English "to".
+- **Topic words** (any script) are passed to Whisper as hints, ahead of the most frequent words from your corrections file.
+- **Timing is unchanged**: the approved text is still aligned by the standard model, which tested more precise than the Hinglish model's own alignment (DECISIONS.md V4.2).
 
 ## Corrections — teach it your words
 
@@ -87,11 +98,12 @@ Every job is also saved in the `jobs/` folder (the input audio, or just the soun
 From the command line:
 
 - `python pipeline.py <audio|video> <lyrics.txt> [vertical|horizontal] [auto|en|hi|hinglish|es|pt|fr|de|it|pa|ur] [song|drama|reels] [isolate=auto|on|off]` (the options are optional, in any order)
-- `python pipeline.py --transcribe <audio|video> [language] [song|drama|reels] [isolate=auto|on|off] [script=same|hinglish|devanagari|urdu|english]` prints a draft transcript
+- `python pipeline.py --transcribe <audio|video> [language] [song|drama|reels] [isolate=auto|on|off] [script=same|hinglish|devanagari|urdu|english] [quality=fast|accurate] [topic=word,word]` prints a draft transcript, with the words to check
+- `python hinglish_model.py download` downloads the Hinglish model ahead of time
 
 ## Settings
 
-Open `config.py` in a text editor — each setting has a one-line comment. (In the Mac app, config.py sits inside the read-only app bundle; the defaults are what you get.) The useful ones: `LANGUAGE` and `TRANSCRIBE_LANGUAGE` (the language preselected in each mode), `SECTIONS` (each section's default format and isolation, and its cue rules), `MUSIC_DETECT_DB` (how loud the background must be for *Auto* isolation), `MAX_UPLOAD_MB` / `MAX_VIDEO_UPLOAD_MB`, `MODEL_SIZE` (`"small"` = faster, `"medium"` = more accurate), `STEM_FORMAT` (`"wav"` or `"mp3"`), `PORT`, and `HOST` (set to `"0.0.0.0"` to let teammates on your network use it from their browser).
+Open `config.py` in a text editor — each setting has a one-line comment. (In the Mac app, config.py sits inside the read-only app bundle; the defaults are what you get.) The useful ones: `LANGUAGE` and `TRANSCRIBE_LANGUAGE` (the language preselected in each mode), `SECTIONS` (each section's default format and isolation, and its cue rules), `MUSIC_DETECT_DB` (how loud the background must be for *Auto* isolation), `MAX_UPLOAD_MB` / `MAX_VIDEO_UPLOAD_MB`, `MODEL_SIZE` (`"small"` = faster, `"medium"` = more accurate), `STEM_FORMAT` (`"wav"` or `"mp3"`), `HINGLISH_ENGINE` (`"apex"`, or `"transliterate"` for the pre-4.2 chain), `QUALITY_DEFAULT` (`"accurate"` or `"fast"`), `LOW_CONFIDENCE` (below this word probability a Hinglish word is highlighted), `PORT`, and `HOST` (set to `"0.0.0.0"` to let teammates on your network use it from their browser).
 
 ## If something goes wrong
 

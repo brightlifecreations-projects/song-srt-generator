@@ -2,6 +2,102 @@ import { useEffect, useRef, useState } from "react";
 
 const today = () => new Date().toISOString().slice(0, 10);
 
+/** The Hinglish house spellings (hinglish-spellings.md): how Hinglish words are spelt in every
+    Hinglish draft, before the corrections file. Built in; edits are saved to the data folder. */
+function HouseSpellings({ active }) {
+  const [state, setState] = useState(null); // {rows, edited, path}
+  const [error, setError] = useState(null);
+  const [adding, setAdding] = useState({ wrong: "", correct: "" });
+  const [saved, setSaved] = useState("");
+  const saveTimer = useRef(null);
+
+  useEffect(() => {
+    if (!active) return;
+    fetch("/api/spellings").then(r => r.json().then(b => {
+      if (r.ok) { setState(b); setError(null); } else setError(b.errors || [b.error]);
+    })).catch(() => {});
+  }, [active]);
+
+  function persist(rows, immediate = false) {
+    setState(s => ({ ...s, rows }));
+    clearTimeout(saveTimer.current);
+    const run = async () => {
+      const res = await fetch("/api/spellings", {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rows }),
+      });
+      const body = await res.json();
+      if (!res.ok) { setError(body.errors || [body.error]); return; }
+      setError(null);
+      setState(body);
+      setSaved(`Saved ${new Date().toLocaleTimeString()}`);
+    };
+    if (immediate) run(); else saveTimer.current = setTimeout(run, 700);
+  }
+  const edit = (key, patch, now) => persist(state.rows.map(r => r.key === key ? { ...r, ...patch } : r), now);
+
+  function add(e) {
+    e.preventDefault();
+    if (!adding.wrong.trim() || !adding.correct.trim()) return;
+    persist([{ key: `new-${Date.now()}`, wrong: adding.wrong.trim(), correct: adding.correct.trim(),
+               disabled: false, notes: "" }, ...state.rows], true);
+    setAdding({ wrong: "", correct: "" });
+  }
+
+  async function restore() {
+    if (!window.confirm("Go back to the built-in house spellings? Your edits to them are removed.")) return;
+    const body = await (await fetch("/api/spellings/reset", { method: "POST" })).json();
+    setState(body);
+    setError(null);
+  }
+
+  if (!state && !error) return null;
+  return (
+    <section className="corr-table spellings" data-testid="house-spellings">
+      <div className="corr-head">
+        <div>
+          <h3>Hinglish house spellings <span className="muted">· built in</span></h3>
+          <p className="section-hint">
+            How Hinglish words are spelt in your subtitles. Every Hinglish draft is rewritten with these
+            (whole words) before your corrections above are applied. Switch a row off, edit it, or add your
+            own. {state?.edited ? <>Your edits are saved in <code>{state.path}</code>.</> : "These are the built-in spellings."}
+          </p>
+        </div>
+        <div className="corr-actions">
+          <button className="loadtxt" onClick={restore} disabled={!state?.edited}>Restore defaults</button>
+        </div>
+      </div>
+      {error && <div className="errbox"><b>Not saved:</b><ul>{error.map(e => <li key={e}>{e}</li>)}</ul></div>}
+      <form className="corr-add" onSubmit={add}>
+        <span className="langpick-label">Add a spelling</span>
+        <input value={adding.wrong} onChange={e => setAdding(a => ({ ...a, wrong: e.target.value }))}
+          placeholder="Written (e.g. nahin)" aria-label="Written" />
+        <input value={adding.correct} onChange={e => setAdding(a => ({ ...a, correct: e.target.value }))}
+          placeholder="House spelling (e.g. nahi)" aria-label="House spelling" />
+        <button className="go small" type="submit">Add</button>
+        {saved && <span className="muted">{saved}</span>}
+      </form>
+      {state && (
+        <table>
+          <thead><tr><th>On</th><th>Written</th><th>House spelling</th><th>Notes</th><th /></tr></thead>
+          <tbody>
+            {state.rows.map(r => (
+              <tr key={r.key} className={r.disabled ? "off" : ""}>
+                <td><input type="checkbox" checked={!r.disabled} aria-label="Enabled"
+                  onChange={e => edit(r.key, { disabled: !e.target.checked }, true)} /></td>
+                <td><input value={r.wrong} onChange={e => edit(r.key, { wrong: e.target.value })} /></td>
+                <td><input value={r.correct} onChange={e => edit(r.key, { correct: e.target.value })} /></td>
+                <td className="muted">{r.notes}</td>
+                <td><button className="corr-del" aria-label={`Delete ${r.wrong}`}
+                  onClick={() => persist(state.rows.filter(x => x.key !== r.key), true)}>Delete</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  );
+}
+
 /** The Corrections tab: everything in corrections.md (Whisper's mistakes and their fixes, one
     table per script). Search, edit, disable, delete, add by hand; upload teammates' files and
     merge them (choosing between conflicting fixes); download the merged file; reset with a backup. */
@@ -235,6 +331,8 @@ export default function Corrections({ active }) {
           </table>
         </section>
       ))}
+
+      <HouseSpellings active={active} />
     </div>
   );
 }

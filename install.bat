@@ -61,6 +61,16 @@ echo       (first time only - roughly 2 GB, can take 10-30 minutes)
 if errorlevel 1 goto :fail
 
 echo.
+echo       Optional: the Hinglish speech model (about 781 MB) writes Hindi speech
+echo       straight in Roman letters. Skip it and it downloads the first time
+echo       you use Hinglish.
+choice /c YN /n /m "      Download it now? [Y/N] "
+if not errorlevel 2 (
+  .venv\Scripts\python.exe hinglish_model.py download
+  if errorlevel 1 echo       Couldn't download it now - it downloads the first time you use Hinglish.
+)
+
+echo.
 echo [3/3] All set.
 echo.
 echo   PASS - installation complete.

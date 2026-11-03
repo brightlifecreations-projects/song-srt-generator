@@ -57,6 +57,15 @@ echo "      (first time only — roughly 2 GB, can take 5–20 minutes)"
 .venv/bin/python warmup.py
 
 echo ""
+echo "      Optional: the Hinglish speech model (about 781 MB) writes Hindi speech straight"
+echo "      in Roman letters. Skip it and it downloads the first time you use Hinglish."
+read -r -p "      Download it now? [y/N] " HINGLISH || HINGLISH=""
+if [ "$HINGLISH" = "y" ] || [ "$HINGLISH" = "Y" ]; then
+  .venv/bin/python hinglish_model.py download \
+    || echo "      Couldn't download it now — it'll download the first time you use Hinglish."
+fi
+
+echo ""
 echo "[3/3] All set."
 echo ""
 echo "  ✓ PASS — installation complete."
