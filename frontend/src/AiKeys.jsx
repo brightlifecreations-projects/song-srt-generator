@@ -1,5 +1,87 @@
 import { useEffect, useState } from "react";
 
+/** The model dropdown (V4.4.1): the provider's own model list (display name, API id in small
+    text, newest first), a refresh button, a built-in list when the live one can't load, the saved
+    model kept as "(saved)" if it isn't listed, and "Custom model id…" for anything else.
+    A stored name that looks like a label ("Haiku 5.5": spaces or capitals) and isn't listed is
+    replaced by the first model; onCleanup saves that. */
+function ModelPicker({ provider, value, onChange, onCleanup }) {
+  const [list, setList] = useState(null); // {models, source, error, loading}
+  const [open, setOpen] = useState(false);
+  const [custom, setCustom] = useState(false);
+  const [filter, setFilter] = useState("");
+
+  async function load(refresh) {
+    setList(l => ({ models: [], ...(l || {}), loading: true }));
+    try {
+      const r = await (await fetch(`/api/ai/models?provider=${provider}${refresh ? "&refresh=true" : ""}`)).json();
+      setList({ ...r, loading: false });
+    } catch {
+      setList({ models: [], source: "builtin", error: "Couldn't load the model list", loading: false });
+    }
+  }
+  useEffect(() => { setList(null); setCustom(false); setOpen(false); load(false); }, [provider]);
+
+  const models = list?.models || [];
+  const listed = models.some(m => m.id === value);
+  useEffect(() => {
+    if (!list || list.loading || !models.length) return;
+    if (!value || (!listed && /\s|[A-Z]/.test(value))) {
+      onChange(models[0].id);
+      if (value) onCleanup?.(models[0].id);
+    }
+  }, [list]);
+
+  const current = models.find(m => m.id === value);
+  const shown = filter ? models.filter(m => `${m.name} ${m.id}`.toLowerCase().includes(filter.toLowerCase())) : models;
+  const pick = id => { onChange(id); setOpen(false); setCustom(false); setFilter(""); };
+
+  return (
+    <div className="modelpick">
+      <div className="modelpick-row">
+        <button type="button" className="modelpick-button" onClick={() => setOpen(o => !o)} aria-haspopup="listbox"
+          aria-expanded={open} aria-label="Model">
+          {current ? <><span>{current.name}</span><small>{current.id}</small></>
+            : value ? <><span>{value} <i>(saved)</i></span><small>not in the provider's list</small></>
+            : <span className="muted">{list?.loading ? "Loading models…" : "Choose a model"}</span>}
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><path d="M3 4.5 6 7.5l3-3" /></svg>
+        </button>
+        <button type="button" className="loadtxt" onClick={() => load(true)} disabled={list?.loading}
+          aria-label="Refresh the model list" title="Refresh the model list">{list?.loading ? "…" : "↻"}</button>
+      </div>
+      {list && !list.loading && list.source === "builtin" && (
+        <small className="muted">Built-in list — the provider's list couldn't load{list.error ? ` (${list.error})` : ""}.</small>
+      )}
+      {open && (
+        <div className="modelpick-list" role="listbox">
+          {models.length > 15 && (
+            <input className="modelpick-filter" value={filter} onChange={e => setFilter(e.target.value)}
+              placeholder={`Filter ${models.length} models…`} autoFocus />
+          )}
+          {value && !listed && (
+            <button type="button" role="option" aria-selected className="on" onClick={() => pick(value)}>
+              <span>{value} <i>(saved)</i></span><small>{value}</small>
+            </button>
+          )}
+          {shown.map(m => (
+            <button type="button" role="option" key={m.id} aria-selected={m.id === value}
+              className={m.id === value ? "on" : ""} onClick={() => pick(m.id)}>
+              <span>{m.name}</span><small>{m.id}</small>
+            </button>
+          ))}
+          <button type="button" role="option" aria-selected={false} onClick={() => { setCustom(true); setOpen(false); }}>
+            <span>Custom model id…</span><small>type any model the provider offers</small>
+          </button>
+        </div>
+      )}
+      {custom && (
+        <input className="modelpick-custom" autoFocus placeholder="Model id, e.g. claude-opus-5-5" aria-label="Custom model id"
+          defaultValue={listed ? "" : value} onChange={e => onChange(e.target.value.trim())} />
+      )}
+    </div>
+  );
+}
+
 const post = (url, body, method = "POST") =>
   fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
@@ -176,11 +258,12 @@ export default function AiKeys({ active, onChange }) {
                 placeholder="Only if your key isn't scoped to a workspace (wrkspc_…)" />
             </label>
           )}
-          <label>
+          <div className="form-field">
             <span className="langpick-label">Model</span>
-            <input value={form.model} onChange={e => setForm(f => ({ ...f, model: e.target.value }))} aria-label="Model"
-              placeholder={provider.default_model || "model name"} />
-          </label>
+            <ModelPicker provider={editing} value={form.model}
+              onChange={id => setForm(f => ({ ...f, model: id }))}
+              onCleanup={id => save({ models: { ...state.models, [editing]: id } })} />
+          </div>
         </div>
         <div className="ai-row">
           <button className="go small" onClick={saveProvider} data-testid="ai-save">Save</button>

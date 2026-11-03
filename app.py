@@ -612,11 +612,20 @@ async def ai_key(request: Request):
         return JSONResponse({"error": "Unknown provider."}, status_code=400)
     try:
         ai_polish.set_key(provider, body.get("key", ""))
+        ai_polish._model_cache.pop(provider, None)  # a new key may see other models
     except ai_polish.PolishError as e:
         return JSONResponse({"error": str(e)}, status_code=500)
     except Exception:
         return JSONResponse({"error": "Couldn't save the key in this computer's key store."}, status_code=500)
     return ai_polish.public_state()
+
+
+@app.get("/api/ai/models")
+def ai_models(provider: str, refresh: bool = False):
+    """The provider's model list (cached), or a short built-in list when it can't be loaded."""
+    if provider not in ai_polish.PROVIDERS:
+        return JSONResponse({"error": "Unknown provider."}, status_code=400)
+    return ai_polish.list_models(provider, refresh)
 
 
 @app.post("/api/ai/test")
