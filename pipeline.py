@@ -479,20 +479,79 @@ def resolve_script(script: str, language: str, audio_path: Path, log: logging.Lo
     return resolved
 
 
+QUALITIES = ("fast", "accurate")
+
+
+def _hinglish_apex(audio_path: Path, log: logging.Logger, hotwords: str, quality: str,
+                   spellings: dict, report) -> dict:
+    """A Hinglish draft from the Apex model (V4.2); Accurate adds the second opinion and the
+    re-check. Raises hinglish_model.DownloadError when the model can't be had."""
+    import hinglish
+    import hinglish_model
+
+    if not hinglish_model.installed():
+        def show(done, total):
+            report("transcribe", f"Downloading the Hinglish model — {done:.0f} of {total:.0f} MB "
+                                 "(only this once)…", min(done / total, 1.0) if total else None)
+        report("transcribe", f"Downloading the Hinglish model ({config.HINGLISH_MODEL_MB} MB, only this once)…", 0.0)
+        hinglish_model.download(show)
+        log.info("Hinglish model downloaded to %s", hinglish_model.MODEL_DIR)
+    report("transcribe", "Transcribing with the Hinglish model…")
+    words = hinglish.draft(audio_path, hotwords, log)
+    if not words:
+        raise PipelineError("Didn't hear any words in this file to transcribe.")
+    model_lines = hinglish.lines_text(words)
+    other, rechecked = None, 0
+    if quality == "accurate":
+        report("transcribe", "Accurate mode — getting a second opinion from the standard model…")
+        other = hinglish.second_opinion(audio_path, _load_align_model(), spellings, log)
+    hinglish.flag(words, other, spellings)
+    if quality == "accurate":
+        report("transcribe", "Accurate mode — re-checking the doubtful bits on their own…")
+        rechecked = hinglish.recheck(audio_path, words, hotwords, log)
+        hinglish.flag(words, other, spellings)
+    return {"words": words, "model_lines": model_lines, "lines": hinglish.lines_text(words),
+            "second_opinion": " ".join(other) if other is not None else None, "rechecked": rechecked}
+
+
 def transcribe_audio(audio_path: Path, language: str | None, log: logging.Logger,
-                     script: str = "same", hotwords: str = "") -> dict:
+                     script: str = "same", hotwords: str = "", quality: str = "accurate",
+                     spellings: dict | None = None, report=lambda key, msg, fraction=None: None) -> dict:
     """Whisper transcription of the vocals (song) or the audio (speech).
 
     script picks the draft's writing system (config.SCRIPTS): it can force the Whisper
     language, switch to the translate task, and convert the result offline.
     Returns {"lines", "language" (spoken, as Whisper detected or was told), "transcribe_language"
-    (code forced, or None for auto), "task", "segments" ([(start, end, text)], for translation)}.
-    Uses the same faster-whisper model as alignment, so nothing extra is downloaded.
-    hotwords: words Whisper should expect (from the corrections file), sent with every
-    30-second window.
+    (code forced, or None for auto), "task", "segments" ([(start, end, text)], for translation),
+    "engine"}, plus for Apex Hinglish drafts "words" (with review flags), "model_lines",
+    "second_opinion" and "rechecked".
+    Hinglish uses the Apex model (downloaded once; quality "fast" or "accurate"), falling back to
+    the V3.8 chain if it can't be had; everything else uses the alignment model.
+    hotwords: words Whisper should expect (topic words and the corrections file), sent with
+    every 30-second window. spellings: the house spelling rows applied to Hinglish drafts.
     """
     if _max_volume_db(audio_path) < SILENCE_DB:
         raise PipelineError("This file is silent, so there's nothing to transcribe.")
+    spellings = spellings or {}
+    fallback_reason = None
+    if script == "hinglish" and config.HINGLISH_ENGINE == "apex":
+        import hinglish_model
+        try:
+            apex = _hinglish_apex(audio_path, log, hotwords, quality, spellings, report)
+        except hinglish_model.DownloadError as e:
+            fallback_reason = str(e)
+            log.warning("Hinglish model unavailable, using the older chain: %s", e)
+        except MemoryError:
+            raise PipelineError("This machine ran out of memory. Close other apps and try again.")
+        except PipelineError:
+            raise
+        except Exception:
+            log.error("Hinglish model raised:\n%s", traceback.format_exc())
+            raise PipelineError(TRANSCRIBE_FAILURE_MESSAGE)
+        else:
+            lines, _ = corrections.apply("\n".join(apex["lines"]), spellings)
+            return {**apex, "lines": lines.split("\n"), "language": "hi", "transcribe_language": "en",
+                    "task": "transcribe", "segments": [], "urdu_converted": False, "engine": "apex"}
     model = _load_align_model()
     code = SCRIPT_TRANSCRIBE_LANGUAGE.get(script, whisper_code(language, transcribing=True))
     task = "translate" if script == "english" else "transcribe"
@@ -519,13 +578,16 @@ def transcribe_audio(audio_path: Path, language: str | None, log: logging.Logger
     if script == "hinglish":
         import transliterate
         converted = transliterate.has_urdu("\n".join(lines))
-        lines = transliterate.to_hinglish("\n".join(lines)).split("\n")
+        lines = transliterate.to_hinglish("\n".join(lines))
+        lines = corrections.apply(lines, spellings)[0].split("\n")
     elif script == "devanagari":
         import transliterate
         converted = transliterate.has_urdu("\n".join(lines))
         lines = transliterate.to_devanagari("\n".join(lines)).split("\n")
     return {"lines": lines, "language": _language_code(result.language), "transcribe_language": code,
-            "task": task, "segments": segments, "urdu_converted": bool(converted)}
+            "task": task, "segments": segments, "urdu_converted": bool(converted),
+            "engine": "transliterate" if script == "hinglish" else "whisper",
+            "fallback_reason": fallback_reason}
 
 
 def _latin_share(text: str) -> float:
@@ -535,6 +597,8 @@ def _latin_share(text: str) -> float:
     return sum(1 for ch in letters if "LATIN" in unicodedata.name(ch, "")) / len(letters)
 
 
+HINGLISH_APEX_NOTE = ("Written in Hinglish by the Hinglish speech model, with your house spellings. "
+                      "Highlighted words are worth a second look — hover one to see why.")
 SCRIPT_NOTES = {
     "hinglish": ("Written in Roman letters automatically from Whisper's Hindi (Devanagari) "
                  "transcription. Check the spellings, and any words Whisper misheard, before approving."),
@@ -545,8 +609,10 @@ SCRIPT_NOTES = {
 
 
 def script_note(choice: str, detected: str, draft: str, script: str = "same",
-                urdu_converted: bool = False) -> str | None:
+                urdu_converted: bool = False, engine: str | None = None) -> str | None:
     """Tell the user what the draft's script means (see DECISIONS V3.8)."""
+    if engine == "apex":
+        return HINGLISH_APEX_NOTE
     if urdu_converted:
         return ("Some words came back in Urdu script and were converted roughly (Urdu writing "
                 "leaves out short vowels). Check them before approving.")
@@ -778,11 +844,15 @@ def flow_steps(mode: str, section: str, isolate: str = "on") -> list[tuple[set, 
 
 
 def make_reporter(steps: list[tuple[set, str]], progress_callback):
-    """report(stage_key, message) → progress_callback(step, total, message)."""
-    def report(key, message):
+    """report(stage_key, message[, fraction]) → progress_callback(step, total, message[, fraction]).
+    fraction (0–1) is only passed for steps with a measurable end, like a model download."""
+    def report(key, message, fraction=None):
         if progress_callback:
             step = next(i for i, (keys, _) in enumerate(steps, start=1) if key in keys)
-            progress_callback(step, len(steps), message)
+            if fraction is None:
+                progress_callback(step, len(steps), message)
+            else:
+                progress_callback(step, len(steps), message, fraction)
     return report
 
 
@@ -859,32 +929,62 @@ def start_job(audio_path, section: str = "song", report=lambda key, msg: None,
     return ctx
 
 
-def run_transcription(ctx: dict, language: str = None, report=lambda key, msg: None,
-                      script: str = DEFAULT_SCRIPT) -> dict:
+def _house_spellings(ctx: dict) -> dict:
+    try:
+        return corrections.load_spellings(DATA_DIR)
+    except corrections.CorrectionsError as e:
+        warning = (f"Your Hinglish house spellings file has {len(e.errors)} bad row(s), so the "
+                   f"built-in spellings were used: {e.errors[0]}. Fix it in the Corrections tab.")
+        ctx["warnings"].append(warning)
+        ctx["log"].warning(warning)
+        return corrections.default_spellings()
+
+
+def run_transcription(ctx: dict, language: str = None, report=lambda key, msg, fraction=None: None,
+                      script: str = DEFAULT_SCRIPT, quality: str = None, topic_words: str = "") -> dict:
     """Whisper draft of what's sung or said, one phrase per line, for the user to edit.
 
     script: a config.SCRIPTS code, or "default" (no saved choice) to pick Hinglish for
-    Hindi/Urdu audio and "same" otherwise.
+    Hindi/Urdu audio and "same" otherwise. quality ("fast"/"accurate") applies to Hinglish
+    drafts. topic_words: the job's names, brands and terms, given to Whisper as hints.
     """
     language = language or config.TRANSCRIBE_LANGUAGE
+    quality = quality if quality in QUALITIES else config.QUALITY_DEFAULT
+    topic = corrections.topic_word_list(topic_words)
     log, job_dir = ctx["log"], ctx["job_dir"]
     report("transcribe", "Transcribing with Whisper — about as long as the audio for English, "
                          "several times longer for Hindi…")
     try:
         t0 = time.perf_counter()
         script = resolve_script(script, language, ctx["source_path"], log)
-        rows, table, hotwords = _corrections_for(ctx, script, language)
-        result = transcribe_audio(ctx["source_path"], language, log, script, hotwords)
+        rows, table, hotwords = _corrections_for(ctx, script, language, topic)
+        spellings = _house_spellings(ctx) if script == "hinglish" else {}
+        result = transcribe_audio(ctx["source_path"], language, log, script, hotwords, quality,
+                                  spellings, report)
         ctx["timings"]["transcribe_seconds"] = round(time.perf_counter() - t0, 2)
+        engine = result["engine"]
         ctx.update(detected_language=result["language"], script=script,
                    transcribe_language=result["transcribe_language"], task=result["task"],
-                   translation_segments=result["segments"] if script == "english" else None)
+                   translation_segments=result["segments"] if script == "english" else None,
+                   engine=engine, quality=quality if engine == "apex" else None, topic_words=topic)
+        if result.get("fallback_reason"):
+            ctx["warnings"].append(
+                f"{result['fallback_reason']} This draft was made the older way instead (Whisper's "
+                "Hindi turned into Roman letters), which is slower and less accurate.")
+        # The draft before the user's corrections: the model's words with the house spellings
+        # (Hinglish). It's what approvals are compared with, so house spellings are never learnt.
         whisper_draft = "\n".join(result["lines"])
         (job_dir / "transcript-draft.txt").write_text(whisper_draft + "\n", encoding="utf-8")
-        log.info("Transcribed %d lines in %.1fs: language choice=%s, script=%s, task=%s, "
-                 "whisper code forced=%s, spoken language=%s",
-                 len(result["lines"]), ctx["timings"]["transcribe_seconds"], language, script,
-                 result["task"], result["transcribe_language"], result["language"])
+        if result.get("model_lines"):
+            (job_dir / "transcript-model.txt").write_text("\n".join(result["model_lines"]) + "\n",
+                                                          encoding="utf-8")
+        if result.get("second_opinion"):
+            (job_dir / "transcript-second-opinion.txt").write_text(result["second_opinion"] + "\n",
+                                                                   encoding="utf-8")
+        log.info("Transcribed %d lines in %.1fs: language choice=%s, script=%s, engine=%s, quality=%s, "
+                 "task=%s, whisper code forced=%s, spoken language=%s",
+                 len(result["lines"]), ctx["timings"]["transcribe_seconds"], language, script, engine,
+                 ctx["quality"], result["task"], result["transcribe_language"], result["language"])
         # The table depends on the spoken language for "same"; it's known for sure only now.
         actual_table = corrections.table_for(script, result["language"])
         if actual_table != table:
@@ -894,8 +994,19 @@ def run_transcription(ctx: dict, language: str = None, report=lambda key, msg: N
             (job_dir / "transcript-autocorrected.txt").write_text(draft + "\n", encoding="utf-8")
             log.info("Auto-corrected %d words from the %s corrections: %s", len(hits), actual_table,
                      ", ".join(f"{h['original']} -> {h['replacement']}" for h in hits))
+        marks = []
+        if result.get("words"):
+            import hinglish
+            marks = hinglish.review_marks(result["words"], draft)
+            (job_dir / "review.json").write_text(json.dumps(
+                {"quality": quality, "words": result["words"], "second_opinion": result["second_opinion"],
+                 "rechecked": result["rechecked"], "marks": marks}, indent=1, ensure_ascii=False),
+                encoding="utf-8")
+            counts = {k: sum(m["kind"] == k for m in marks) for k in ("disagree", "unsure", "rechecked")}
+            log.info("Review highlights: %s (%d stretches re-checked and replaced)", counts, result["rechecked"])
         ctx.update(whisper_draft=whisper_draft, corrections_table=actual_table,
-                   auto_corrections=hits, recorded_pairs=ctx.get("recorded_pairs") or {})
+                   auto_corrections=hits, review_marks=marks,
+                   recorded_pairs=ctx.get("recorded_pairs") or {})
     except PipelineError:
         raise
     except Exception:
@@ -904,14 +1015,18 @@ def run_transcription(ctx: dict, language: str = None, report=lambda key, msg: N
         "draft_text": draft,
         "whisper_draft": whisper_draft,
         "auto_corrections": hits,
+        "review_marks": marks,
         "corrections_table": actual_table,
         "hotwords": hotwords,
+        "topic_words": topic,
+        "engine": engine,
+        "quality": ctx["quality"],
         "detected_language": result["language"],
         "detected_language_name": language_name(result["language"]),
         "script": script,
         "approximate_timing": script == "english",
         "script_note": script_note(language, result["language"], draft, script,
-                                   result["urdu_converted"]),
+                                   result["urdu_converted"], engine),
     }
 
 
@@ -929,23 +1044,25 @@ def _corrections_rows(ctx: dict, table: str) -> dict:
         return {}
 
 
-def _corrections_for(ctx: dict, script: str, language: str) -> tuple[dict, str, str]:
-    """Before transcribing: the corrections table this draft will most likely use, and its most
-    frequent correct words as Whisper hotwords (counted with Whisper's own tokenizer)."""
+def _corrections_for(ctx: dict, script: str, language: str,
+                     topic: list[str] = ()) -> tuple[dict, str, str]:
+    """Before transcribing: the corrections table this draft will most likely use, and Whisper's
+    hotwords: the job's topic words, then the table's most frequent correct words (counted with
+    Whisper's own tokenizer)."""
     spoken = whisper_code(language, transcribing=True)
     if script == "same" and spoken is None and corrections.path(DATA_DIR).exists():
         spoken = detect_language(ctx["source_path"])
     table = corrections.table_for(script, spoken)
     rows = _corrections_rows(ctx, table)
     words = ""
-    if rows:
+    if rows or topic:
         model = _load_align_model()
         tokenizer = getattr(model, "hf_tokenizer", None)
         count = (lambda s: len(tokenizer.encode(s, add_special_tokens=False).ids)) if tokenizer else None
-        words = corrections.hotwords(rows, count)
+        words = corrections.hotwords(rows, count, topic=topic)
         if words:
-            ctx["log"].info("Hotwords for Whisper (%s corrections, %d tokens max): %s",
-                            table, corrections.HOTWORD_TOKENS, words)
+            ctx["log"].info("Hotwords for Whisper (%d topic words, %s corrections, %d tokens max): %s",
+                            len(topic), table, corrections.HOTWORD_TOKENS, words)
     ctx["hotwords"] = words
     return rows, table, words
 
@@ -1109,6 +1226,10 @@ def align_and_write(ctx: dict, lyrics_text: str, strip_tags: bool = True,
             "corrections_table": ctx.get("corrections_table"),
             "auto_corrections": len(ctx.get("auto_corrections") or []),
             "hotwords": ctx.get("hotwords") or None,
+            "topic_words": ctx.get("topic_words") or None,
+            "transcribe_engine": ctx.get("engine"),
+            "quality": ctx.get("quality"),
+            "review_highlights": len(ctx.get("review_marks") or []),
             "separator_engine": config.SEPARATOR_ENGINE if isolated else None,
             "separator_model": config.SEPARATOR_MODEL if isolated else None,
             "duration_seconds": round(ctx["duration"], 2),
@@ -1165,7 +1286,7 @@ def run_pipeline(audio_path, lyrics_text: str, strip_tags: bool = True,
 # ---------------------------------------------------------------------------
 # CLI
 
-def _progress(step, total, message):
+def _progress(step, total, message, fraction=None):
     print(f"[{step}/{total}] {message}")
 
 
@@ -1175,19 +1296,25 @@ def main(argv: list[str]) -> int:
     usage = ("Usage: python pipeline.py <audio|video> <lyrics.txt> [vertical|horizontal] "
              f"[{'|'.join(codes)}] [{sections}] [isolate=auto|on|off]\n"
              f"       python pipeline.py --transcribe <audio|video> [{'|'.join(codes)}] [{sections}] "
-             f"[isolate=auto|on|off] [script={'|'.join(SCRIPT_CODES)}]")
+             f"[isolate=auto|on|off] [script={'|'.join(SCRIPT_CODES)}] [quality=fast|accurate] "
+             "[topic=word,word]")
     transcribe = bool(argv) and argv[0] == "--transcribe"
     if transcribe:
         argv = argv[1:]
     positional = 1 if transcribe else 2
-    if not positional <= len(argv) <= positional + 5:
+    if not positional <= len(argv) <= positional + 7:
         print(usage)
         return 2
-    video_format = language = section = isolate = None
+    video_format = language = section = isolate = quality = None
     script = DEFAULT_SCRIPT
+    topic = ""
     for arg in argv[positional:]:
         if transcribe and arg.startswith("script=") and arg[7:] in SCRIPT_CODES:
             script = arg[7:]
+        elif transcribe and arg.startswith("quality=") and arg[8:] in QUALITIES:
+            quality = arg[8:]
+        elif transcribe and arg.startswith("topic="):
+            topic = arg[6:]
         elif arg.startswith("isolate=") and arg[8:] in ISOLATE_CHOICES and isolate is None:
             isolate = arg[8:]
         elif arg in ("vertical", "horizontal") and video_format is None and not transcribe:
@@ -1206,10 +1333,15 @@ def main(argv: list[str]) -> int:
         if transcribe:
             report = make_reporter(flow_steps("transcribe", section, isolate), _progress)
             ctx = start_job(Path(argv[0]), section, report, isolate)
-            draft = run_transcription(ctx, language, report, script)
+            draft = run_transcription(ctx, language, report, script, quality, topic)
             print(f"Job folder: {ctx['job_dir']}")
             print(f"Language:   {draft['detected_language_name']} ({draft['detected_language']})")
-            print(f"Script:     {draft['script']}")
+            print(f"Script:     {draft['script']} ({draft['engine']}, quality {draft['quality']})")
+            for w in ctx["warnings"]:
+                print(f"WARNING: {w}")
+            for m in draft["review_marks"]:
+                print(f"CHECK:      line {m['line'] + 1} “{m['replacement']}” — {m['kind']}"
+                      + (f" (other: “{m['original']}”)" if m["original"] else ""))
             if draft["script_note"]:
                 print(f"NOTE: {draft['script_note']}")
             print(f"Timings:    {ctx['timings']}")

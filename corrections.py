@@ -424,21 +424,136 @@ def apply(text: str, rows: dict) -> tuple[str, list[dict]]:
     return "\n".join(out_lines), hits
 
 
-def hotwords(rows: dict, count_tokens=None, limit: int = HOTWORD_TOKENS) -> str:
-    """The most frequent correct words of a table, comma-separated, within Whisper's prompt limit.
-    count_tokens(text) → token count (the model's own tokenizer); without it ~4 chars a token."""
+def topic_word_list(text: str) -> list[str]:
+    """A job's "Topic words" field (commas or new lines between them) → distinct words/phrases."""
+    out, seen = [], set()
+    for part in re.split(r"[,\n;]+", text or ""):
+        part = " ".join(part.split())
+        if part and part.casefold() not in seen:
+            seen.add(part.casefold())
+            out.append(part)
+    return out
+
+
+def hotwords(rows: dict, count_tokens=None, limit: int = HOTWORD_TOKENS, topic: list[str] = ()) -> str:
+    """The job's topic words, then the most frequent correct words of a table, comma-separated,
+    within Whisper's prompt limit. count_tokens(text) → token count (the model's own tokenizer);
+    without it ~4 chars a token."""
     count_tokens = count_tokens or (lambda s: len(s) // 3 + 1)
     words, seen = [], set()
-    for row in sorted((r for r in rows.values() if not r["disabled"]), key=lambda r: -r["count"]):
-        word = row["correct"].strip()
+    ranked = sorted((r for r in rows.values() if not r["disabled"]), key=lambda r: -r["count"])
+    for word in [*topic, *(r["correct"] for r in ranked)]:
+        word = word.strip()
         if word.casefold() in seen:
             continue
-        candidate = ", ".join(words + [word])
+        candidate = ", ".join(words + [word]) + "."
         if count_tokens(" " + candidate) > limit:
             break
         words.append(word)
         seen.add(word.casefold())
-    return ", ".join(words)
+    # The full stop matters: without it Whisper reads the list as words already said, and a
+    # hotword that's also the first thing spoken was skipped ("Kal ke board exam…" lost its
+    # first four words with "board exam" among the hotwords; V4.2).
+    return ", ".join(words) + "." if words else ""
+
+
+# ---------------------------------------------------------------------------
+# House spellings for Hinglish (V4.2)
+#
+# How Hinglish words are spelt in this house ("nahi", not "nahin"), applied to every Hinglish
+# draft before corrections.md. Built in, editable in the Corrections tab; saved to
+# hinglish-spellings.md in the data folder only once edited. Kept apart from corrections.md so
+# they're never merged with teammates' files or counted as learnt fixes.
+
+SPELLINGS_FILE = "hinglish-spellings.md"
+SPELLINGS_COLUMNS = ["Written", "House spelling", "Notes"]
+SPELLINGS_HEADER = """# SRT Generator — Hinglish house spellings
+
+How Hinglish words are spelt in your subtitles. Every Hinglish draft is rewritten with these
+before your corrections file is applied. Strike a word through (`~~to~~`) to switch it off.
+"""
+# (written, house spelling, on?, notes)
+DEFAULT_SPELLINGS = [
+    ("nahin", "nahi", True, ""), ("chaahie", "chahiye", True, ""), ("chaahiye", "chahiye", True, ""),
+    ("chahie", "chahiye", True, ""), ("hamen", "humein", True, ""), ("hamein", "humein", True, ""),
+    ("ham", "hum", True, ""), ("ke lie", "ke liye", True, ""), ("ki lie", "ki liye", True, ""),
+    ("isalie", "isliye", True, ""), ("isilie", "isiliye", True, ""), ("kisalie", "kisliye", True, ""),
+    ("yah", "yeh", True, ""), ("vah", "woh", True, ""), ("vo", "wo", True, ""),
+    ("vaala", "wala", True, ""), ("vaale", "wale", True, ""), ("vaali", "wali", True, ""),
+    ("vaise", "waise", True, ""), ("vaapas", "wapas", True, ""), ("vahaan", "wahan", True, ""),
+    ("vahan", "wahan", True, ""), ("yahaan", "yahan", True, ""), ("kahaan", "kahan", True, ""),
+    ("kyon", "kyun", True, ""), ("kyonki", "kyunki", True, ""), ("hun", "hoon", True, ""),
+    ("kuchh", "kuch", True, ""), ("pahle", "pehle", True, ""), ("pahale", "pehle", True, ""),
+    ("thik", "theek", True, ""), ("achchha", "accha", True, ""), ("tumhen", "tumhe", True, ""),
+    ("unhen", "unhe", True, ""), ("mujhen", "mujhe", True, ""),
+    ("to", "toh", False, "off: “to” is also English"),
+]
+
+
+def default_spellings() -> dict:
+    return {key_of(w): {"wrong": w, "correct": c, "disabled": not on, "notes": n}
+            for w, c, on, n in DEFAULT_SPELLINGS}
+
+
+def parse_spellings(text: str, source: str = SPELLINGS_FILE) -> dict:
+    """Markdown → {key: row}. Raises CorrectionsError listing every bad row."""
+    rows, errors = {}, []
+    for n, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = _cells(stripped)
+        if all(re.fullmatch(r":?-{3,}:?", c) for c in cells if c):
+            continue
+        if [c.lower() for c in cells[:2]] == [c.lower() for c in SPELLINGS_COLUMNS[:2]]:
+            continue
+        where = f"{source} line {n}"
+        if len(cells) < 2:
+            errors.append(f"{where}: needs 2 columns (Written | House spelling)")
+            continue
+        wrong, correct = cells[0], cells[1].strip()
+        notes = cells[2] if len(cells) > 2 else ""
+        disabled = bool(re.fullmatch(r"~~.+~~", wrong))
+        if disabled:
+            wrong = wrong[2:-2].strip()
+        key = key_of(wrong)
+        if not key or not correct:
+            errors.append(f"{where}: both 'Written' and 'House spelling' are needed")
+        elif key in rows:
+            errors.append(f"{where}: '{wrong}' is listed twice")
+        else:
+            rows[key] = {"wrong": wrong, "correct": correct, "disabled": disabled, "notes": notes}
+    if errors:
+        raise CorrectionsError(errors)
+    return rows
+
+
+def render_spellings(rows: dict) -> str:
+    out = [SPELLINGS_HEADER, "| " + " | ".join(SPELLINGS_COLUMNS) + " |",
+           "|" + "---|" * len(SPELLINGS_COLUMNS)]
+    for row in sorted(rows.values(), key=lambda r: r["wrong"].casefold()):
+        wrong = _cell(row["wrong"])
+        out.append(f"| {'~~' + wrong + '~~' if row['disabled'] else wrong} | {_cell(row['correct'])} "
+                   f"| {_cell(row.get('notes', ''))} |")
+    return "\n".join(out) + "\n"
+
+
+def load_spellings(data_dir: Path) -> dict:
+    """The house spellings: the edited file if there is one, else the built-in table."""
+    p = Path(data_dir) / SPELLINGS_FILE
+    return parse_spellings(p.read_text(encoding="utf-8"), p.name) if p.exists() else default_spellings()
+
+
+def save_spellings(data_dir: Path, rows: dict):
+    p = Path(data_dir) / SPELLINGS_FILE
+    tmp = p.with_suffix(".md.tmp")
+    tmp.write_text(render_spellings(rows), encoding="utf-8")
+    tmp.replace(p)
+
+
+def reset_spellings(data_dir: Path):
+    """Back to the built-in table (the edited file is removed)."""
+    (Path(data_dir) / SPELLINGS_FILE).unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------

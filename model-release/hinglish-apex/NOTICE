@@ -1,0 +1,21 @@
+Whisper-Hindi2Hinglish-Apex — CTranslate2 int8 conversion, as downloaded by SRT Generator
+
+Original model: Whisper-Hindi2Hinglish-Apex by Oriserve (OriserveAI)
+  https://huggingface.co/Oriserve/Whisper-Hindi2Hinglish-Apex
+  https://github.com/OriserveAI/Whisper-Hindi2Hinglish
+  Revision f3214eed20b4e4d4144e739982d911f87b9cb223
+  Licensed under the Apache License, Version 2.0 (see LICENSE).
+  Fine-tuned by Oriserve from openai/whisper-large-v3-turbo (MIT licence, OpenAI).
+
+All credit for the model and its training goes to Oriserve.
+
+Changes made for SRT Generator (brightlifecreations-projects/song-srt-generator):
+  - Converted from the Hugging Face Transformers weights to CTranslate2 format with int8
+    quantisation (ctranslate2 4.8.1, ct2-transformers-converter --quantization int8), for use
+    with faster-whisper.
+  - generation_config.json had no alignment_heads, which word timestamps need; the base model's
+    (openai/whisper-large-v3-turbo: [[2,4],[2,11],[3,3],[3,6],[3,11],[3,14]]) were added before
+    conversion.
+  - No weights were retrained or otherwise modified.
+
+The conversion script is model-release/hinglish-apex/build.sh in the SRT Generator repository.

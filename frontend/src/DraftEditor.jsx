@@ -28,9 +28,27 @@ export function liveMarks(text, marks) {
     .filter((m, i, all) => i === 0 || m.at.from >= all[i - 1].at.to);
 }
 
-/** The draft box: a textarea with the auto-corrected words highlighted behind it.
-    Hovering a highlight shows the original word with Undo. */
-export default function DraftEditor({ value, onChange, marks, onUndo, readOnly, placeholder }) {
+/** What a highlight's tooltip says, by why the word is highlighted. */
+function TipText({ mark }) {
+  const pct = Math.round((mark.probability || 0) * 100);
+  switch (mark.kind) {
+    case "disagree":
+      return mark.original
+        ? <>The second opinion heard <b>“{mark.original}”</b></>
+        : <>The second opinion heard nothing here</>;
+    case "unsure":
+      return <>The Hinglish model wasn't sure of this word ({pct}%)</>;
+    case "rechecked":
+      return <>Re-checked on its own — first heard <b>“{mark.original}”</b></>;
+    default:
+      return <>Auto-corrected from <b>“{mark.original}”</b></>;
+  }
+}
+
+/** The draft box: a textarea with highlighted words behind it — auto-corrections, and (Hinglish)
+    words worth checking. Hovering a highlight explains it: Undo puts back the original word,
+    Use takes the second opinion's word, Keep removes the highlight. */
+export default function DraftEditor({ value, onChange, marks, onUndo, onUse, onKeep, readOnly, placeholder }) {
   const areaRef = useRef(null);
   const backRef = useRef(null);
   const wrapRef = useRef(null);
@@ -59,7 +77,7 @@ export default function DraftEditor({ value, onChange, marks, onUndo, readOnly, 
     let pos = 0;
     live.forEach(m => {
       if (m.at.from > pos) out.push(value.slice(pos, m.at.from));
-      out.push(<mark key={m.id} data-id={m.id}>{value.slice(m.at.from, m.at.to)}</mark>);
+      out.push(<mark key={m.id} data-id={m.id} data-kind={m.kind || "auto"}>{value.slice(m.at.from, m.at.to)}</mark>);
       pos = m.at.to;
     });
     out.push(value.slice(pos) + "\n");
@@ -105,8 +123,13 @@ export default function DraftEditor({ value, onChange, marks, onUndo, readOnly, 
       {tip?.mark && (
         <div className="drafttip" role="tooltip" style={{ left: tip.x, top: tip.y }}
           onMouseEnter={() => clearTimeout(hideTimer.current)} onMouseLeave={scheduleHide}>
-          Auto-corrected from <b>“{tip.mark.original}”</b>
-          <button onClick={() => { onUndo(tip.mark); setTip(null); }}>Undo</button>
+          <TipText mark={tip.mark} />
+          {(!tip.mark.kind || tip.mark.kind === "auto" || tip.mark.kind === "rechecked") &&
+            <button onClick={() => { onUndo(tip.mark); setTip(null); }}>Undo</button>}
+          {tip.mark.kind === "disagree" && tip.mark.original &&
+            <button onClick={() => { onUse(tip.mark); setTip(null); }}>Use “{tip.mark.original}”</button>}
+          {tip.mark.kind && tip.mark.kind !== "auto" &&
+            <button onClick={() => { onKeep(tip.mark); setTip(null); }}>Keep</button>}
         </div>
       )}
     </div>

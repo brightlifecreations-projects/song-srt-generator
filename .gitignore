@@ -14,3 +14,7 @@ bin/
 .uv-cache/
 corrections.md
 corrections-backups/
+# Test fixtures: the Lovika Hospital video and its reference transcript stay local (public repo).
+test-fixtures/*.mp4
+test-fixtures/*-reference.txt
+test-fixtures/.work/

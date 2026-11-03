@@ -28,7 +28,8 @@ from fastapi.staticfiles import StaticFiles
 
 import config
 import corrections
-from pipeline import (ACCEPTED_EXTENSIONS, AUTO_LANGUAGE, DATA_DIR, DEFAULT_SCRIPT,
+import hinglish_model
+from pipeline import (ACCEPTED_EXTENSIONS, AUTO_LANGUAGE, DATA_DIR, DEFAULT_SCRIPT, QUALITIES,
                       SCRIPT_CODES, PipelineError, align_and_write, clean_isolate, clean_section,
                       flow_steps, is_video, make_reporter, preprocess_lyrics, record_approval,
                       run_transcription, start_job)
@@ -87,8 +88,8 @@ def _evict_finished_jobs():
 def _run_job(job: dict):
     """Run the job's next phase. task: "lyrics" (whole flow), "transcribe" (up to the
     draft) or "align" (approved draft → SRT, reusing the job's audio and vocals)."""
-    def progress(step, total, message):
-        job.update(stage=step, message=message)
+    def progress(step, total, message, fraction=None):
+        job.update(stage=step, message=message, progress=fraction)
 
     steps = flow_steps(job["mode"], job["section"], job["isolate"])
     report = make_reporter(steps, progress)
@@ -102,7 +103,8 @@ def _run_job(job: dict):
         shutil.rmtree(job["upload_dir"], ignore_errors=True)
     ctx = job["ctx"]
     if job["task"] == "transcribe":
-        draft = run_transcription(ctx, job["language"], report, job["script"])
+        draft = run_transcription(ctx, job["language"], report, job["script"], job["quality"],
+                                  job["topic_words"])
         job.update(status="draft", message="Draft ready", timings=dict(ctx["timings"]),
                    warnings=list(ctx["warnings"]), job_dir=ctx["job_dir"].name, **draft)
         return
@@ -165,6 +167,7 @@ def meta():
         "language_default": config.LANGUAGE,
         "transcribe_language_default": config.TRANSCRIBE_LANGUAGE,
         "scripts": [{"code": code, "name": name} for code, name in config.SCRIPTS],
+        "quality_default": config.QUALITY_DEFAULT,
         "accepted_extensions": sorted(ACCEPTED_EXTENSIONS),
         "max_upload_mb": {"audio": config.MAX_UPLOAD_MB, "video": config.MAX_VIDEO_UPLOAD_MB},
         "max_chars": {"vertical": config.MAX_CHARS_VERTICAL,
@@ -292,10 +295,14 @@ async def create_transcription(
     isolate: str = Form(""),
     script: str = Form(DEFAULT_SCRIPT),
     video_preview: bool = Form(False),
+    quality: str = Form(config.QUALITY_DEFAULT),
+    topic_words: str = Form(""),
 ):
     """Transcribe mode, phase 1: prepare the audio (and vocals) and return a Whisper draft.
 
-    script: a config.SCRIPTS code, or "default" when the user has no saved choice."""
+    script: a config.SCRIPTS code, or "default" when the user has no saved choice.
+    quality: "fast" or "accurate" (Hinglish drafts). topic_words: names, brands and terms for
+    Whisper to expect, comma-separated."""
     _, language, section = _clean_choices(
         config.FORMAT_DEFAULT, language, section, config.TRANSCRIBE_LANGUAGE)
     _evict_finished_jobs()
@@ -309,6 +316,8 @@ async def create_transcription(
         "language": language, "section": section, "isolate": clean_isolate(isolate, section),
         "video_preview": video_preview,
         "script": script if script in SCRIPT_CODES else DEFAULT_SCRIPT,
+        "quality": quality if quality in QUALITIES else config.QUALITY_DEFAULT,
+        "topic_words": topic_words[:2000],
     })
 
 
@@ -333,12 +342,12 @@ def approve_transcript(
     return _queue(job_id, job)
 
 
-PUBLIC_KEYS = ("status", "stage", "steps", "message", "mode", "section", "isolate",
+PUBLIC_KEYS = ("status", "stage", "steps", "message", "progress", "mode", "section", "isolate",
                "music_detected", "srt_name",
                "job_dir", "cues", "timings", "warnings", "audio_ready", "draft_text",
                "detected_language", "detected_language_name", "script", "approximate_timing",
                "script_note", "auto_corrections", "corrections_table", "hotwords",
-               "corrections_recorded")
+               "corrections_recorded", "review_marks", "engine", "quality", "topic_words")
 
 
 @app.get("/api/jobs/{job_id}")
@@ -507,6 +516,60 @@ def corrections_download():
 def corrections_reset():
     saved = corrections.reset(DATA_DIR)
     return {"backup": str(saved) if saved else None, "state": _corrections_state({})}
+
+
+# ---------------------------------------------------------------------------
+# Hinglish house spellings (hinglish-spellings.md, DECISIONS V4.2)
+
+def _spellings_state(rows: dict | None = None):
+    try:
+        rows = corrections.load_spellings(DATA_DIR) if rows is None else rows
+    except corrections.CorrectionsError as e:
+        return JSONResponse({"error": "Your hinglish-spellings.md has errors.", "errors": e.errors,
+                             "path": str(DATA_DIR / corrections.SPELLINGS_FILE)}, status_code=422)
+    return {"rows": [{"key": k, **r} for k, r in sorted(rows.items())],
+            "edited": (DATA_DIR / corrections.SPELLINGS_FILE).exists(),
+            "path": str(DATA_DIR / corrections.SPELLINGS_FILE)}
+
+
+@app.get("/api/spellings")
+def spellings_get():
+    return _spellings_state()
+
+
+@app.put("/api/spellings")
+async def spellings_put(request: Request):
+    lines = ["| " + " | ".join(corrections.SPELLINGS_COLUMNS) + " |"]
+    for r in (await request.json()).get("rows", []):
+        wrong = corrections._cell(r.get("wrong", "")).strip()
+        lines.append(f"| {'~~' + wrong + '~~' if r.get('disabled') else wrong} "
+                     f"| {corrections._cell(r.get('correct', ''))} | {corrections._cell(r.get('notes', ''))} |")
+    try:
+        rows = corrections.parse_spellings("\n".join(lines), "your edits")
+    except corrections.CorrectionsError as e:
+        return JSONResponse({"error": "Some rows aren't valid.", "errors": e.errors}, status_code=422)
+    corrections.save_spellings(DATA_DIR, rows)
+    return _spellings_state(rows)
+
+
+@app.post("/api/spellings/reset")
+def spellings_reset():
+    corrections.reset_spellings(DATA_DIR)
+    return _spellings_state()
+
+
+# ---------------------------------------------------------------------------
+# The Hinglish model (downloaded once, DECISIONS V4.2)
+
+@app.get("/api/hinglish-model")
+def hinglish_model_status():
+    return hinglish_model.status()
+
+
+@app.post("/api/hinglish-model/download")
+def hinglish_model_download():
+    hinglish_model.start_background_download()
+    return hinglish_model.status()
 
 
 app.mount("/", StaticFiles(directory=str(DIST), html=True), name="frontend")

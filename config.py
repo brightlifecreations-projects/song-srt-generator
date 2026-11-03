@@ -42,6 +42,25 @@ SCRIPTS = [
 # Hinglish (Hindi in Roman script) aligns best as English.
 LANGUAGE_ALIASES = {"hinglish": "en"}
 
+# Hinglish drafts (V4.2): Oriserve's Whisper-Hindi2Hinglish-Apex (Apache-2.0), converted to
+# CTranslate2 int8. Downloaded once, the first time Hinglish is used (or from setup), into
+# models/; fully offline after that. "transliterate" uses the V3.8 chain instead (Whisper
+# medium in Hindi → Devanagari → Roman letters), which is also the fallback when the model
+# can't be downloaded.
+HINGLISH_ENGINE = "apex"
+HINGLISH_MODEL_URL = ("https://github.com/brightlifecreations-projects/song-srt-generator/releases/"
+                      "download/model-hinglish-apex-int8-v1/whisper-hinglish-apex-int8.zip")
+HINGLISH_MODEL_SHA256 = "fbac3003e9a94c7ff2f209b0c501b5b0f13dd6d81ec7188c18df84cf7585b42d"
+HINGLISH_MODEL_MB = 781
+
+# Transcribe mode's speed switch for Hinglish drafts, "fast" or "accurate" (the default).
+# Accurate also runs the V3.8 chain as a second opinion, highlights words where the two disagree,
+# and re-transcribes short doubtful stretches on their own, keeping the better result.
+QUALITY_DEFAULT = "accurate"
+
+# Words the Hinglish model gives a probability below this are highlighted for checking.
+LOW_CONFIDENCE = 0.5
+
 # Windows and source checkouts: on launch, ask GitHub whether a newer release exists and show a
 # small banner if so. It fails silently when offline. The Mac app uses Sparkle instead (V4.0).
 CHECK_FOR_UPDATES = True
