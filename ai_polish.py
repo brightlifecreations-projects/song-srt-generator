@@ -72,6 +72,8 @@ def load_settings() -> dict:
     provider = saved.get("provider") if saved.get("provider") in PROVIDERS else "anthropic"
     models = {code: (saved.get("models") or {}).get(code) or p["model"] for code, p in PROVIDERS.items()}
     return {"enabled": bool(saved.get("enabled")), "provider": provider, "models": models,
+            # Polish every new draft automatically (V4.4); off = only when "Polish" is clicked.
+            "auto": saved.get("auto", True) is not False,
             "custom_base_url": saved.get("custom_base_url", ""),
             "anthropic_workspace_id": saved.get("anthropic_workspace_id", ""),
             # Which providers have a key saved — names only. Keeps the key store from being read
@@ -80,7 +82,8 @@ def load_settings() -> dict:
 
 
 def save_settings(settings: dict):
-    clean = {"enabled": bool(settings.get("enabled")), "provider": settings.get("provider", "anthropic"),
+    clean = {"enabled": bool(settings.get("enabled")), "auto": settings.get("auto", True) is not False,
+             "provider": settings.get("provider", "anthropic"),
              "models": {k: str(v).strip() for k, v in (settings.get("models") or {}).items() if k in PROVIDERS},
              "custom_base_url": str(settings.get("custom_base_url", "")).strip(),
              # Only for Anthropic keys not scoped to a workspace; an ID, not a secret.

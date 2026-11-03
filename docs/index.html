@@ -114,8 +114,6 @@ h2{font-family:var(--fd);font-weight:560;font-size:clamp(28px,3.6vw,42px);letter
 /* footer */
 footer{border-top:1px solid var(--line-strong);padding:30px 0 40px;display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
 .f-meta{font-family:var(--fm);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
-.attribution{font-family:var(--fd);font-style:italic;font-size:15px;color:var(--ink-soft);display:flex;align-items:center;gap:10px}
-.attribution::before,.attribution::after{content:"";width:26px;height:1px;background:var(--line-strong)}
 </style>
 </head>
 <body>
@@ -143,7 +141,7 @@ footer{border-top:1px solid var(--line-strong);padding:30px 0 40px;display:flex;
     <a class="btn ghost" href="#how">See how it works</a>
   </div>
   <span class="hero-note">No accounts · No uploads · No telemetry · Works offline</span>
-  <div class="shot"><img src="assets/site-light.png" alt="SRT Generator app — a reel previewed with its subtitles on the video" loading="eager"></div>
+  <div class="shot"><img src="assets/site-light.png" alt="SRT Generator — a video previewed with its subtitles, inputs on the left and the result on the right" loading="eager"></div>
 </header>
 
 <section id="how" class="hr">
@@ -181,7 +179,7 @@ footer{border-top:1px solid var(--line-strong);padding:30px 0 40px;display:flex;
     <span class="kicker">Dark mode</span>
     <h2>Studio at night.</h2>
     <p>One click in the corner. A warm midnight console, not an inverted afterthought.</p>
-    <div class="shot"><img src="assets/site-dark.png" alt="SRT Generator in dark mode"></div>
+    <div class="shot"><img src="assets/site-dark.png" alt="SRT Generator in dark mode, with the sidebar"></div>
     <p class="leakline">i hear this song even after you close the app. especially then.</p>
   </div>
 </section>
@@ -230,13 +228,11 @@ footer{border-top:1px solid var(--line-strong);padding:30px 0 40px;display:flex;
       <a class="btn" href="https://github.com/brightlifecreations-projects/song-srt-generator/releases/latest" data-dl="win">Download for Windows</a>
     </div>
   </div>
-  <div class="privacy"><b>The privacy promise:</b> your files are processed entirely on your own computer. This website has no analytics, the app's only network request is the update check (no data sent), and the source code is public so you can check both claims.</div>
+  <div class="privacy"><b>The privacy promise:</b> your files are processed entirely on your own computer. This website has no analytics, the app only goes online to check for updates and to download its speech models once (no data sent), plus the optional AI polish you can switch on, which sends transcript text only to the AI provider you choose, and the source code is public so you can check both claims.</div>
 </section>
 
 <footer>
   <span class="f-meta">Free &amp; open · Bright Life Creations</span>
-  <!-- PROTECTED ATTRIBUTION — owner mandate, do not remove (see repo DECISIONS.md) -->
-  <span class="attribution">Made by Aman using Claude</span>
   <span class="f-meta"><a href="https://github.com/brightlifecreations-projects/song-srt-generator" style="color:inherit">Source on GitHub</a></span>
 </footer>
 

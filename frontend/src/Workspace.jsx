@@ -351,6 +351,8 @@ export default function Workspace({ section, preset, meta, active }) {
   const [scriptPick, setScriptPick] = useTabSetting(section, "script", AUTO_SCRIPT);
   const [quality, setQuality] = useTabSetting(section, "quality", "");
   const [topicWords, setTopicWords] = useState("");
+  const [moreOpen, setMoreOpenState] = useState(() => stored("srt-more-options", "") === "open");
+  const setMoreOpen = open => { setMoreOpenState(open); store("srt-more-options", open ? "open" : "closed"); };
   const [file, setFile] = useState(null);
   const [fileError, setFileError] = useState("");
   const [lyrics, setLyrics] = useState("");
@@ -587,44 +589,38 @@ export default function Workspace({ section, preset, meta, active }) {
     goLabel = hasDraft ? "Approve & generate SRT" : "Transcribe";
     goAction = hasDraft ? approve : transcribe;
   }
+  const chevron = <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><path d="M3 4.5 6 7.5l3-3" /></svg>;
 
   return (
     <div className="workspace" hidden={!active}>
-      <div className="modeswitch" role="tablist" aria-label="Mode">
-        <button role="tab" aria-selected={!transcribing} className={`mode${!transcribing ? " on" : ""}`}
-          onClick={() => setMode("lyrics")} disabled={working}>
-          <b>I have the {section === "song" ? "lyrics" : "script"}</b>
-          <span>Paste the exact words; they're timed to the audio.</span>
-        </button>
-        <button role="tab" aria-selected={transcribing} className={`mode${transcribing ? " on" : ""}`}
-          onClick={() => setMode("transcribe")} disabled={working}>
-          <b>Transcribe for me</b>
-          <span>Get a draft, fix it, approve it, get the SRT.</span>
-        </button>
-      </div>
-
-      <main className="workbench"
+      <div className="workbench"
         onDragOver={e => { e.preventDefault(); if (!working) setDrag(true); }}
         onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setDrag(false); }}
         onDrop={dropFile}>
         {/* ------------------------- inputs ------------------------- */}
         <div className="col-inputs">
-          <section className="section">
-            <div className="section-head">
-              <span className="section-num">01</span>
-              <h2 className="section-title">The audio or video</h2>
-            </div>
-            <p className="section-hint">MP3, WAV, M4A or FLAC — or MP4, MOV, M4V, MKV or WEBM video (its sound is subtitled; the video is previewed with the subtitles on it).</p>
+          <div className="modeswitch" role="tablist" aria-label="Mode">
+            <button role="tab" aria-selected={!transcribing} className={`mode${!transcribing ? " on" : ""}`}
+              onClick={() => setMode("lyrics")} disabled={working}>
+              <b>I have the {section === "song" ? "lyrics" : "script"}</b>
+              <span>Paste the exact words; they're timed to the audio.</span>
+            </button>
+            <button role="tab" aria-selected={transcribing} className={`mode${transcribing ? " on" : ""}`}
+              onClick={() => setMode("transcribe")} disabled={working}>
+              <b>Transcribe for me</b>
+              <span>Get a draft, fix it, approve it.</span>
+            </button>
+          </div>
+
+          <section className="field">
+            <h2 className="field-label">Audio or video</h2>
             {!file ? (
-              <button
-                className={`dropzone${drag ? " drag" : ""}`}
-                onClick={() => audioInput.current.click()}
-              >
+              <button className={`dropzone${drag ? " drag" : ""}`} onClick={() => audioInput.current.click()}>
                 <div className="dropzone-icon">
                   <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><path d="M7 11V2M3.5 5.5 7 2l3.5 3.5" /><path d="M1.5 12.5h11" /></svg>
                 </div>
                 <div className="dropzone-label">Drop the file here</div>
-                <div className="dropzone-sub">or click to browse</div>
+                <div className="dropzone-sub">or click to browse · MP3, WAV, M4A, FLAC · MP4, MOV, M4V, MKV, WEBM</div>
               </button>
             ) : (
               <div className={`filechip${drag ? " drag" : ""}`}>
@@ -638,24 +634,74 @@ export default function Workspace({ section, preset, meta, active }) {
             {fileError && <div className="warnbox file-error">{fileError}</div>}
             <input ref={audioInput} type="file" accept={ACCEPT} hidden
               onChange={e => { pickAudio(e.target.files[0]); e.target.value = ""; }} />
+          </section>
 
-            <div className="segmented isolate-pick" role="radiogroup" aria-label="Voice isolation">
-              {isolateChoices.map(([code, title, hint]) => (
-                <button key={code} role="radio" aria-checked={isolate === code}
-                  className={`segment${isolate === code ? " on" : ""}`}
-                  onClick={() => pickIsolate(code)} disabled={working}>
-                  <span><b>{title}</b><span>{hint}</span></span>
-                </button>
-              ))}
+          <section className="field">
+            <h2 className="field-label">Format</h2>
+            <div className="segmented">
+              <button className={`segment${format === "vertical" ? " on" : ""}`} onClick={() => setFormat("vertical")}>
+                <span className="segment-frame v" />
+                <span><b>Vertical 9:16</b><span>Reels · Shorts · max 25 chars</span></span>
+              </button>
+              <button className={`segment${format === "horizontal" ? " on" : ""}`} onClick={() => setFormat("horizontal")}>
+                <span className="segment-frame h" />
+                <span><b>Horizontal 16:9</b><span>YouTube · TV · max 42 chars</span></span>
+              </button>
             </div>
           </section>
 
-          <section className="section">
-            <div className="lyrics-head">
-              <div className="section-head" style={{ marginBottom: 0 }}>
-                <span className="section-num">02</span>
-                <h2 className="section-title">The {copy.text}</h2>
+          <section className="field">
+            <label className="langpick">
+              <span className="langpick-label">Language</span>
+              <span className="langpick-field">
+                <select value={language} onChange={e => setLanguage(e.target.value)} disabled={!languages.length || working}>
+                  {languages.map(l => <option key={l.code} value={l.code}>{l.name}</option>)}
+                </select>
+                {chevron}
+              </span>
+            </label>
+            {transcribing && (
+              <label className="langpick">
+                <span className="langpick-label">{section === "song" ? "Lyrics script" : "Script"}</span>
+                <span className="langpick-field">
+                  <select value={scriptPick} onChange={e => setScriptPick(e.target.value)} disabled={!scripts.length || working}>
+                    {scriptPick === AUTO_SCRIPT && <option value={AUTO_SCRIPT}>Automatic</option>}
+                    {scripts.map(o => <option key={o.code} value={o.code}>{o.name}</option>)}
+                  </select>
+                  {chevron}
+                </span>
+              </label>
+            )}
+            {transcribing && (
+              <p className="lang-note">
+                {scriptPick === AUTO_SCRIPT && "Automatic: Hindi or Urdu audio is written as Hinglish, anything else in its own script. "}
+                {scriptPick === "english" && "English translation has approximate timing: translated words can't be matched to the audio word by word. "}
+                {scriptPick === "hinglish" && "Hindi in Roman letters, written by the Hinglish speech model. "}
+                {hasDraft && draft.pickedWith !== scriptPick && "Transcribe again to use this script; approving keeps the current draft's."}
+              </p>
+            )}
+            {maybeHinglish && hinglishModel && hinglishModel.state !== "installed" && (
+              <div className="modelnote" data-testid="hinglish-model">
+                {hinglishModel.state === "downloading" ? (
+                  <>
+                    Downloading the Hinglish model — {Math.round(hinglishModel.done_mb)} of {Math.round(hinglishModel.total_mb || hinglishModel.size_mb)} MB
+                    <div className="proc-progress"><i style={{ width: `${Math.min(100, (hinglishModel.done_mb / (hinglishModel.total_mb || hinglishModel.size_mb || 1)) * 100)}%` }} /></div>
+                  </>
+                ) : (
+                  <>
+                    {hinglishModel.state === "error" && <><b>{hinglishModel.error}</b><br /></>}
+                    The Hinglish model ({hinglishModel.size_mb} MB) downloads once, the first time you
+                    transcribe Hinglish; after that it works offline.{" "}
+                    <button className="loadtxt" onClick={downloadModel}>Download now</button>
+                  </>
+                )}
               </div>
+            )}
+          </section>
+
+          <section className="field">
+            <div className="lyrics-head">
+              <h2 className="field-label">{transcribing ? "Draft" : `The ${copy.text}`}</h2>
               {!transcribing && (
                 <>
                   <button className="loadtxt" onClick={() => txtInput.current.click()}>Load .txt</button>
@@ -694,14 +740,13 @@ export default function Workspace({ section, preset, meta, active }) {
             )}
             {transcribing && hasDraft && draft.review > 0 && (
               <p className="autofix-note" data-testid="review-count">
-                <b className="check">{toCheck} {toCheck === 1 ? "word" : "words"} to check</b>
+                <b className="tocheck">{toCheck} {toCheck === 1 ? "word" : "words"} to check</b>
                 {draft.quality === "accurate"
                   ? " — the second opinion heard something else, or the model wasn't sure. "
                   : " — the model wasn't sure of them. "}
                 Hover one to see why; <i>Keep</i> removes its highlight.
               </p>
             )}
-            {transcribing && hasDraft && (job?.warnings || []).map(w => <div key={w} className="warnbox draft-note">{w}</div>)}
             {transcribing && hasDraft && draft.note && <div className="warnbox draft-note">{draft.note}</div>}
             <DraftEditor
               value={lyrics}
@@ -713,102 +758,57 @@ export default function Workspace({ section, preset, meta, active }) {
               placeholder={transcribing ? DRAFT_PLACEHOLDER : LYRICS_PLACEHOLDER[section]}
               readOnly={transcribing && !hasDraft}
             />
-            {!transcribing && (
-              <label className="check">
-                <input type="checkbox" checked={stripTags} onChange={e => setStripTags(e.target.checked)} />
-                Remove section labels like [Verse] and [Chorus]
-              </label>
-            )}
           </section>
 
-          <section className="section" style={{ borderBottom: "none" }}>
-            <div className="section-head">
-              <span className="section-num">03</span>
-              <h2 className="section-title">The format</h2>
-            </div>
-            <p className="section-hint">
-              Sets how long each subtitle line can be, and the language being {copy.sung}. {copy.rules}
-            </p>
-            <div className="segmented">
-              <button className={`segment${format === "vertical" ? " on" : ""}`} onClick={() => setFormat("vertical")}>
-                <span className="segment-frame v" />
-                <span><b>Vertical 9:16</b><span>Reels · TikTok · Shorts · max 25 chars</span></span>
-              </button>
-              <button className={`segment${format === "horizontal" ? " on" : ""}`} onClick={() => setFormat("horizontal")}>
-                <span className="segment-frame h" />
-                <span><b>Horizontal 16:9</b><span>YouTube · TV · max 42 chars</span></span>
-              </button>
-            </div>
-
-            <label className="langpick">
-              <span className="langpick-label">Language</span>
-              <span className="langpick-field">
-                <select value={language} onChange={e => setLanguage(e.target.value)} disabled={!languages.length || working}>
-                  {languages.map(l => <option key={l.code} value={l.code}>{l.name}</option>)}
-                </select>
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><path d="M3 4.5 6 7.5l3-3" /></svg>
-              </span>
-            </label>
-            {transcribing && (
-              <label className="langpick">
-                <span className="langpick-label">{section === "song" ? "Lyrics script" : "Script"}</span>
-                <span className="langpick-field">
-                  <select value={scriptPick} onChange={e => setScriptPick(e.target.value)} disabled={!scripts.length || working}>
-                    {scriptPick === AUTO_SCRIPT && <option value={AUTO_SCRIPT}>Automatic</option>}
-                    {scripts.map(o => <option key={o.code} value={o.code}>{o.name}</option>)}
-                  </select>
-                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><path d="M3 4.5 6 7.5l3-3" /></svg>
-                </span>
-              </label>
-            )}
-            {transcribing && (
-              <p className="lang-note">
-                {scriptPick === AUTO_SCRIPT && "Automatic: Hindi or Urdu audio is written as Hinglish, anything else in its own script. "}
-                {scriptPick === "english" && "English translation has approximate timing: translated words can't be matched to the audio word by word. "}
-                {scriptPick === "hinglish" && "Hindi in Roman letters, converted offline from Whisper's Devanagari. "}
-                {hasDraft && draft.pickedWith !== scriptPick && "Transcribe again to use this script; approving keeps the current draft's."}
-              </p>
-            )}
-            {maybeHinglish && (
-              <div className="speedpick">
-                <span className="langpick-label">Hinglish speed</span>
-                <div className="segmented small" role="radiogroup" aria-label="Hinglish speed">
-                  {[["fast", "Fast", "One pass"], ["accurate", "Accurate", "Second opinion + re-check"]].map(([code, title, hint]) => (
-                    <button key={code} role="radio" aria-checked={speed === code}
-                      className={`segment${speed === code ? " on" : ""}`}
-                      onClick={() => setQuality(code)} disabled={working}>
+          <details className="moreopts" open={moreOpen} data-testid="more-options"
+            onToggle={e => setMoreOpen(e.currentTarget.open)}>
+            <summary>More options</summary>
+            <div className="moreopts-body">
+              <div>
+                <span className="langpick-label">Voice isolation</span>
+                <div className="segmented isolate-pick" role="radiogroup" aria-label="Voice isolation">
+                  {isolateChoices.map(([code, title, hint]) => (
+                    <button key={code} role="radio" aria-checked={isolate === code}
+                      className={`segment${isolate === code ? " on" : ""}`}
+                      onClick={() => pickIsolate(code)} disabled={working}>
                       <span><b>{title}</b><span>{hint}</span></span>
                     </button>
                   ))}
                 </div>
               </div>
-            )}
-            {maybeHinglish && hinglishModel && hinglishModel.state !== "installed" && (
-              <div className="modelnote" data-testid="hinglish-model">
-                {hinglishModel.state === "downloading" ? (
-                  <>
-                    Downloading the Hinglish model — {Math.round(hinglishModel.done_mb)} of {Math.round(hinglishModel.total_mb || hinglishModel.size_mb)} MB
-                    <div className="proc-progress"><i style={{ width: `${Math.min(100, (hinglishModel.done_mb / (hinglishModel.total_mb || hinglishModel.size_mb || 1)) * 100)}%` }} /></div>
-                  </>
-                ) : (
-                  <>
-                    {hinglishModel.state === "error" && <><b>{hinglishModel.error}</b><br /></>}
-                    The Hinglish model ({hinglishModel.size_mb} MB) downloads once, the first time you
-                    transcribe Hinglish; after that it works offline.{" "}
-                    <button className="loadtxt" onClick={downloadModel}>Download now</button>
-                  </>
-                )}
-              </div>
-            )}
-            {transcribing && (
-              <label className="topicwords">
-                <span className="langpick-label">Topic words <span className="muted">(optional)</span></span>
-                <input value={topicWords} onChange={e => setTopicWords(e.target.value)} disabled={working}
-                  placeholder="Names, brands, terms — e.g. Lovika, reel, laptop, client" />
-                <span className="lang-note">Whisper is told to expect these, along with your corrections.</span>
-              </label>
-            )}
+              {!transcribing && (
+                <label className="check">
+                  <input type="checkbox" checked={stripTags} onChange={e => setStripTags(e.target.checked)} />
+                  Remove section labels like [Verse] and [Chorus]
+                </label>
+              )}
+              {transcribing && (
+                <label className="topicwords">
+                  <span className="langpick-label">Topic words <span className="muted">(optional)</span></span>
+                  <input value={topicWords} onChange={e => setTopicWords(e.target.value)} disabled={working}
+                    placeholder="Names, brands, terms — e.g. Lovika, reel, laptop, client" />
+                  <span className="lang-note">Whisper is told to expect these, along with your corrections.</span>
+                </label>
+              )}
+              {maybeHinglish && (
+                <div className="speedpick">
+                  <span className="langpick-label">Hinglish speed</span>
+                  <div className="segmented small" role="radiogroup" aria-label="Hinglish speed">
+                    {[["fast", "Fast", "One pass"], ["accurate", "Accurate", "Second opinion + re-check"]].map(([code, title, hint]) => (
+                      <button key={code} role="radio" aria-checked={speed === code}
+                        className={`segment${speed === code ? " on" : ""}`}
+                        onClick={() => setQuality(code)} disabled={working}>
+                        <span><b>{title}</b><span>{hint}</span></span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {!transcribing && !maybeHinglish && <p className="lang-note">{copy.rules}</p>}
+            </div>
+          </details>
 
+          <div className="actions">
             <button className="go" disabled={!ready} onClick={goAction}>
               {working ? "Working…" : goLabel}
               <span className="arrow">
@@ -817,16 +817,16 @@ export default function Workspace({ section, preset, meta, active }) {
             </button>
             {hasDraft && !working && aiOn && (
               <button className="retranscribe" onClick={polishAgain} data-testid="polish-again">
-                Polish again with {aiOn}
+                {draft.aiProvider ? "Polish again" : "Polish"} with {aiOn}
               </button>
             )}
             {hasDraft && !working && (
               <button className="retranscribe" onClick={transcribe}>Discard the draft and transcribe again</button>
             )}
-          </section>
+          </div>
         </div>
 
-        {/* ------------------------- stage ------------------------- */}
+        {/* ------------------------- output (sticky) ------------------------- */}
         <div className="stagecol">
           {isVideo ? (
             <VideoPreview ref={playerRef} file={file} fallbackSrc={videoFallback} cues={cues}
@@ -838,7 +838,7 @@ export default function Workspace({ section, preset, meta, active }) {
           ) : (
             <div className="wavecard">
               <div className="wavecard-head">
-                <span className="wavecard-title">Waveform</span>
+                <span className="wavecard-title">Preview</span>
               </div>
               <div className="wave-holder">
                 <div className="wave-empty">
@@ -948,21 +948,8 @@ export default function Workspace({ section, preset, meta, active }) {
               </motion.div>
             )}
           </AnimatePresence>
-
-          {phase === "idle" && !file && (
-            <p className="stage-note">
-              {transcribing ? (
-                <>Drop in {section === "song" ? "a song or music video" : section === "drama" ? "a scene or episode" : "a reel, short or YouTube video"}.
-                Whisper writes a <b>draft transcript</b>; you correct it, approve it, and every word is then timed to the audio.</>
-              ) : (
-                <>Drop in {section === "song" ? "a song or music video" : section === "drama" ? "a scene or episode" : "a reel, short or YouTube video"} and
-                its exact {copy.text}. On this Mac a typical file takes <b>under a minute</b> — every word is aligned to the audio,
-                and the subtitles appear {isVideo ? "on the video" : "here"} when it's done.</>
-              )}
-            </p>
-          )}
         </div>
-      </main>
+      </div>
     </div>
   );
 }
