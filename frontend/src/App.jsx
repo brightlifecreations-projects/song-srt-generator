@@ -36,6 +36,18 @@ function useMeta() {
   return [meta, update];
 }
 
+/** The AI polish provider's name while it's on (re-checked when the tab changes), else null. */
+function useAiOn(section) {
+  const [name, setName] = useState(null);
+  useEffect(() => {
+    fetch("/api/ai").then(r => r.json()).then(s => {
+      const p = (s.providers || []).find(x => x.code === s.provider);
+      setName(s.enabled && s.usable && p ? p.name : null);
+    }).catch(() => {});
+  }, [section]);
+  return name;
+}
+
 export default function App() {
   const [theme, toggleTheme] = useTheme();
   const [meta, update] = useMeta();
@@ -59,6 +71,7 @@ export default function App() {
     try { localStorage.setItem("srt-section", code); } catch { /* private mode */ }
   }
 
+  const aiOn = useAiOn(section);
   const tabs = SECTION_TABS.map(t => ({ ...t, ...(meta?.sections || []).find(s => s.code === t.code) }));
 
   return (
@@ -71,7 +84,7 @@ export default function App() {
       )}
       <header className="masthead">
         <div className="masthead-left">
-          <span className="kicker">Local subtitle tool — offline</span>
+          <span className="kicker">{aiOn ? "Local subtitle tool — AI polish on" : "Local subtitle tool — offline"}</span>
           <h1><em>SRT</em> Generator</h1>
           <p className="masthead-sub">
             Songs, dramas, reels and YouTube videos — subtitles timed to every word. Bring your
@@ -82,7 +95,11 @@ export default function App() {
           <button className="theme-toggle" onClick={toggleTheme}>
             <span className="theme-dot" />{theme === "light" ? "Dark" : "Light"}
           </button>
-          <p className="privacy"><b>Everything runs on this machine.</b><br />Files never leave your computer.</p>
+          {aiOn ? (
+            <p className="privacy" data-testid="privacy"><b>AI polish is on: transcript text goes to {aiOn}.</b><br />Audio and video never leave your computer.</p>
+          ) : (
+            <p className="privacy" data-testid="privacy"><b>Everything runs on this machine.</b><br />Files never leave your computer.</p>
+          )}
         </div>
       </header>
 

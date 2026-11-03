@@ -9,3 +9,5 @@ uvicorn[standard]
 python-multipart
 audio-separator[cpu]
 aksharamukha==2.3  # Hinglish transliteration (pinned; V3.8)
+anthropic  # AI polish, Claude adapter (V4.3)
+keyring  # AI polish keys in Windows Credential Manager (V4.3)

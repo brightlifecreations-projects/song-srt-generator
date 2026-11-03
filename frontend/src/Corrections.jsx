@@ -2,6 +2,115 @@ import { useEffect, useRef, useState } from "react";
 
 const today = () => new Date().toISOString().slice(0, 10);
 
+/** AI polish settings: on/off, provider, key (saved in the system key store, never shown again),
+    model, Custom base URL, Test connection. Off until a key is added. */
+function AiSettings({ active }) {
+  const [state, setState] = useState(null);
+  const [key, setKey] = useState("");
+  const [test, setTest] = useState(null); // {ok, message} | "running"
+  const [error, setError] = useState("");
+
+  useEffect(() => { if (active) fetch("/api/ai").then(r => r.json()).then(setState).catch(() => {}); }, [active]);
+  if (!state) return null;
+  const provider = state.providers.find(p => p.code === state.provider);
+  const model = state.models[state.provider] || "";
+
+  async function save(patch) {
+    const body = await (await fetch("/api/ai", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...state, ...patch, providers: undefined }),
+    })).json();
+    setState(body);
+    setTest(null);
+  }
+  async function saveKey(value) {
+    setError("");
+    const res = await fetch("/api/ai/key", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: state.provider, key: value }),
+    });
+    const body = await res.json();
+    if (!res.ok) { setError(body.error); return; }
+    setState(body);
+    setKey("");
+    setTest(null);
+  }
+  async function runTest() {
+    setTest("running");
+    const res = await fetch("/api/ai/test", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: state.provider, model, custom_base_url: state.custom_base_url,
+                             anthropic_workspace_id: state.anthropic_workspace_id }),
+    });
+    setTest(await res.json());
+  }
+
+  return (
+    <section className="ai-panel" data-testid="ai-settings">
+      <div className="corr-head">
+        <div>
+          <h3>AI polish <span className="muted">· optional, online</span></h3>
+          <p className="section-hint">
+            After the offline draft, an AI model of your choice fixes misheard and misspelled words — the same
+            lines, nothing added or removed — in every tab. Its changes are highlighted for you to check.
+          </p>
+        </div>
+        <label className="switch" title={state.usable ? "" : state.why_not}>
+          <input type="checkbox" checked={state.enabled} disabled={!state.usable && !state.enabled}
+            onChange={e => save({ enabled: e.target.checked })} aria-label="AI polish on" />
+          {state.enabled ? "On" : "Off"}
+        </label>
+      </div>
+      <p className="ai-privacy"><b>Only the transcript text is sent to the provider you choose. Audio and video never leave this computer.</b></p>
+      <div className="ai-row">
+        <span className="langpick-label">Provider</span>
+        <select value={state.provider} onChange={e => save({ provider: e.target.value })} aria-label="Provider">
+          {state.providers.map(p => <option key={p.code} value={p.code}>{p.name}{p.has_key ? " · key saved" : ""}</option>)}
+        </select>
+        {provider.key_url && <a className="loadtxt" href={provider.key_url} target="_blank" rel="noreferrer">Get a key</a>}
+      </div>
+      {state.provider === "custom" && (
+        <div className="ai-row">
+          <span className="langpick-label">Base URL</span>
+          <input defaultValue={state.custom_base_url} key={`url-${state.provider}`} aria-label="Base URL"
+            placeholder="e.g. http://localhost:11434/v1 (Ollama) or https://api.deepseek.com/v1"
+            onBlur={e => e.target.value !== state.custom_base_url && save({ custom_base_url: e.target.value })} />
+        </div>
+      )}
+      {state.provider === "anthropic" && (
+        <div className="ai-row">
+          <span className="langpick-label">Workspace ID</span>
+          <input defaultValue={state.anthropic_workspace_id} key="ws-anthropic" aria-label="Workspace ID"
+            placeholder="Only if your key isn't scoped to a workspace (wrkspc_…)"
+            onBlur={e => e.target.value !== state.anthropic_workspace_id && save({ anthropic_workspace_id: e.target.value })} />
+        </div>
+      )}
+      <div className="ai-row">
+        <span className="langpick-label">API key</span>
+        <input type="password" value={key} onChange={e => setKey(e.target.value)} autoComplete="off" aria-label="API key"
+          placeholder={provider.has_key ? "A key is saved — paste a new one to replace it" : "Paste your API key"} />
+        <button className="go small" onClick={() => saveKey(key)} disabled={!key.trim()}>Save key</button>
+        {provider.has_key && <button className="loadtxt" onClick={() => saveKey("")}>Remove key</button>}
+        <span className="muted">Saved in this computer's {navigator.platform.startsWith("Win") ? "Credential Manager" : "Keychain"}, one per provider.</span>
+      </div>
+      <div className="ai-row">
+        <span className="langpick-label">Model</span>
+        <input defaultValue={model} key={`model-${state.provider}-${model}`} aria-label="Model"
+          placeholder={provider.default_model || "model name"}
+          onBlur={e => e.target.value.trim() && e.target.value !== model &&
+            save({ models: { ...state.models, [state.provider]: e.target.value.trim() } })} />
+        <button className="loadtxt" onClick={runTest} disabled={test === "running"} data-testid="ai-test">
+          {test === "running" ? "Testing…" : "Test connection"}
+        </button>
+        {test && test !== "running" && <span className={`ai-status ${test.ok ? "ok" : "bad"}`}>{test.message}</span>}
+      </div>
+      {!state.usable && <p className="muted ai-status">{state.why_not} to switch AI polish on.</p>}
+      {!state.key_store && <div className="errbox">This computer has no secure key store, so AI polish can't be used here.</div>}
+      {error && <div className="errbox">{error}</div>}
+    </section>
+  );
+}
+
 /** The Hinglish house spellings (hinglish-spellings.md): how Hinglish words are spelt in every
     Hinglish draft, before the corrections file. Built in; edits are saved to the data folder. */
 function HouseSpellings({ active }) {
@@ -111,6 +220,7 @@ export default function Corrections({ active }) {
   const [drag, setDrag] = useState(false);
   const [adding, setAdding] = useState({ table: "Hinglish", wrong: "", correct: "" });
   const [notice, setNotice] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("all");
   const fileInput = useRef(null);
   const saveTimer = useRef(null);
 
@@ -159,7 +269,7 @@ export default function Corrections({ active }) {
     const table = adding.table.trim();
     if (!table || !adding.wrong.trim() || !adding.correct.trim()) return;
     const row = { key: `new-${Date.now()}`, wrong: adding.wrong.trim(), correct: adding.correct.trim(),
-                  count: 1, last_seen: today(), notes: "added by hand", disabled: false };
+                  count: 1, last_seen: today(), source: "User", notes: "added by hand", disabled: false };
     const exists = state.tables.some(t => t.name === table);
     const next = exists
       ? state.tables.map(t => t.name === table ? { ...t, rows: [row, ...t.rows] } : t)
@@ -208,9 +318,17 @@ export default function Corrections({ active }) {
   const q = query.trim().toLowerCase();
   const tables = (state?.tables || []).map(t => ({
     ...t,
-    rows: t.rows.filter(r => !q || [t.name, r.wrong, r.correct, r.notes].some(v => String(v).toLowerCase().includes(q))),
+    rows: t.rows.filter(r => (sourceFilter === "all" || (r.source || "User") === sourceFilter) &&
+      (!q || [t.name, r.wrong, r.correct, r.notes].some(v => String(v).toLowerCase().includes(q)))),
   })).filter(t => t.rows.length);
   const total = (state?.tables || []).reduce((n, t) => n + t.rows.length, 0);
+  const aiOnRows = (state?.tables || []).reduce((n, t) => n + t.rows.filter(r => r.source === "AI" && !r.disabled).length, 0);
+
+  /** Switch off every row whose fix came from AI polish alone (Source "AI"). */
+  function disableAiRows() {
+    if (!window.confirm(`Switch off all ${aiOnRows} corrections that came from AI polish? You can switch them back on one by one.`)) return;
+    persist(state.tables.map(t => ({ ...t, rows: t.rows.map(r => r.source === "AI" ? { ...r, disabled: true } : r) })), true);
+  }
   const tableNames = [...new Set([...(state?.suggested_tables || []), ...(state?.tables || []).map(t => t.name)])];
 
   return (
@@ -240,6 +358,8 @@ export default function Corrections({ active }) {
       <div className={`corr-drop${drag ? " drag" : ""}`} onClick={() => fileInput.current.click()}>
         Drop one or more <b>corrections .md</b> files here (from teammates) to merge them with yours
       </div>
+
+      <AiSettings active={active} />
 
       {notice && <div className="stage-note corr-notice">{notice}</div>}
       {loadError && (
@@ -273,7 +393,7 @@ export default function Corrections({ active }) {
                     <label key={i} className="check">
                       <input type="radio" name={c.id} checked={upload.choices[c.id] === i}
                         onChange={() => setUpload(u => ({ ...u, choices: { ...u.choices, [c.id]: i } }))} />
-                      <span>“{o.correct}” <span className="muted">— {o.source}, seen {o.count}×, last {o.last_seen}</span></span>
+                      <span>“{o.correct}” <span className="muted">— {o.source}, seen {o.count}×, last {o.last_seen}{o.source_kind ? `, ${o.source_kind}` : ""}</span></span>
                     </label>
                   ))}
                 </fieldset>
@@ -301,6 +421,15 @@ export default function Corrections({ active }) {
       <div className="corr-toolbar">
         <input className="corr-search" type="search" placeholder="Search corrections…" value={query}
           onChange={e => setQuery(e.target.value)} />
+        <select className="corr-filter" value={sourceFilter} onChange={e => setSourceFilter(e.target.value)} aria-label="Source">
+          <option value="all">All sources</option>
+          <option value="User">Source: User</option>
+          <option value="AI">Source: AI</option>
+          <option value="AI+User">Source: AI+User</option>
+        </select>
+        <button className="loadtxt" onClick={disableAiRows} disabled={!aiOnRows} data-testid="disable-ai">
+          Switch off AI rows{aiOnRows ? ` (${aiOnRows})` : ""}
+        </button>
         <span className="muted">{total} correction{total === 1 ? "" : "s"}{state?.backups ? ` · ${state.backups} backup${state.backups === 1 ? "" : "s"}` : ""}{saved && ` · ${saved}`}</span>
       </div>
       {saveError && <div className="errbox"><b>Not saved:</b><ul>{saveError.map(e => <li key={e}>{e}</li>)}</ul></div>}
@@ -312,7 +441,7 @@ export default function Corrections({ active }) {
         <section key={t.name} className="corr-table">
           <h3>{t.name}</h3>
           <table>
-            <thead><tr><th>On</th><th>Wrong</th><th>Correct</th><th>Times seen</th><th>Last seen</th><th>Notes</th><th /></tr></thead>
+            <thead><tr><th>On</th><th>Wrong</th><th>Correct</th><th>Times seen</th><th>Last seen</th><th>Source</th><th>Notes</th><th /></tr></thead>
             <tbody>
               {t.rows.map(r => (
                 <tr key={r.key} className={r.disabled ? "off" : ""}>
@@ -323,6 +452,7 @@ export default function Corrections({ active }) {
                   <td><input className="num" type="number" min="1" value={r.count}
                     onChange={e => editRow(t.name, r.key, { count: e.target.value })} /></td>
                   <td className="mono">{r.last_seen}</td>
+                  <td className="mono">{r.source || "User"}</td>
                   <td className="muted">{r.notes}</td>
                   <td><button className="corr-del" onClick={() => deleteRow(t.name, r.key)} aria-label={`Delete ${r.wrong}`}>Delete</button></td>
                 </tr>

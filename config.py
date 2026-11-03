@@ -61,6 +61,13 @@ QUALITY_DEFAULT = "accurate"
 # Words the Hinglish model gives a probability below this are highlighted for checking.
 LOW_CONFIDENCE = 0.5
 
+# AI polish (V4.3, optional and online — the one part of the app that sends anything out): after
+# the offline draft, the transcript text goes to the AI provider chosen in the Corrections tab,
+# which fixes misheard words only. Off until a key is added. Provider, model and the on/off switch
+# are set in the app (saved in ai-settings.json); keys live in the system key store, never here.
+# Longest wait for the provider before keeping the offline draft as it is:
+AI_TIMEOUT_SECONDS = 90
+
 # Windows and source checkouts: on launch, ask GitHub whether a newer release exists and show a
 # small banner if so. It fails silently when offline. The Mac app uses Sparkle instead (V4.0).
 CHECK_FOR_UPDATES = True
