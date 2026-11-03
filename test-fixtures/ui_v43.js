@@ -128,5 +128,4 @@ await until(() => ws().querySelector("[data-testid=ai-message]") || ws().querySe
 log("failure message:", ws().querySelector("[data-testid=ai-message]")?.textContent);
 log("draft kept (offline):", area.value.split("\n")[0]);
 await fetch("http://127.0.0.1:7899/mode/ok").catch(() => {});
-log("footer:", document.querySelector("footer")?.textContent.includes("Made by Aman using Claude"));
 return "ok";

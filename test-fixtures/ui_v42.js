@@ -90,5 +90,4 @@ $$("button", panel).find(b => b.textContent === "Restore defaults").click();
 await sleep(800);
 server = await (await fetch("/api/spellings")).json();
 log("after Restore defaults — 'to' disabled:", server.rows.find(r => r.wrong === "to").disabled, "edited:", server.edited);
-log("footer:", document.querySelector("footer")?.textContent.includes("Made by Aman using Claude"));
 return "ok";
