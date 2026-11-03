@@ -73,7 +73,10 @@ def load_settings() -> dict:
     models = {code: (saved.get("models") or {}).get(code) or p["model"] for code, p in PROVIDERS.items()}
     return {"enabled": bool(saved.get("enabled")), "provider": provider, "models": models,
             "custom_base_url": saved.get("custom_base_url", ""),
-            "anthropic_workspace_id": saved.get("anthropic_workspace_id", "")}
+            "anthropic_workspace_id": saved.get("anthropic_workspace_id", ""),
+            # Which providers have a key saved — names only. Keeps the key store from being read
+            # (and macOS from asking for access) except when a request is actually sent.
+            "keys_saved": [c for c in saved.get("keys_saved", []) if c in PROVIDERS]}
 
 
 def save_settings(settings: dict):
@@ -81,7 +84,8 @@ def save_settings(settings: dict):
              "models": {k: str(v).strip() for k, v in (settings.get("models") or {}).items() if k in PROVIDERS},
              "custom_base_url": str(settings.get("custom_base_url", "")).strip(),
              # Only for Anthropic keys not scoped to a workspace; an ID, not a secret.
-             "anthropic_workspace_id": str(settings.get("anthropic_workspace_id", "")).strip()}
+             "anthropic_workspace_id": str(settings.get("anthropic_workspace_id", "")).strip(),
+             "keys_saved": sorted(set(settings.get("keys_saved") or []) & set(PROVIDERS))}
     p = _settings_path()
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(clean, indent=2), encoding="utf-8")
@@ -117,6 +121,10 @@ def set_key(provider: str, key: str):
             kr.delete_password(KEYCHAIN_SERVICE, provider)
         except Exception:
             pass
+    settings = load_settings()
+    saved = set(settings["keys_saved"])
+    settings["keys_saved"] = sorted(saved | {provider} if key else saved - {provider})
+    save_settings(settings)
 
 
 def _local(url: str) -> bool:
@@ -131,7 +139,7 @@ def usable(settings: dict | None = None) -> tuple[bool, str]:
         return False, "Custom needs a base URL"
     if not s["models"].get(provider):
         return False, "Choose a model name"
-    if not get_key(provider) and not (provider == "custom" and _local(s["custom_base_url"])):
+    if provider not in s["keys_saved"] and not (provider == "custom" and _local(s["custom_base_url"])):
         return False, "Add an API key first"
     return True, ""
 
@@ -155,7 +163,7 @@ def public_state() -> dict:
         store = False
     return {**s, "usable": ok, "why_not": why, "key_store": store,
             "providers": [{"code": c, "name": p["name"], "default_model": p["model"], "key_url": p["key_url"],
-                           "has_key": bool(get_key(c))} for c, p in PROVIDERS.items()]}
+                           "has_key": c in s["keys_saved"]} for c, p in PROVIDERS.items()]}
 
 
 def provider_name(code: str) -> str:
@@ -319,7 +327,10 @@ def adapter_for(settings: dict) -> Adapter:
     code = settings["provider"]
     p = PROVIDERS[code]
     base = settings["custom_base_url"] if code == "custom" else p["base_url"]
-    adapter = ADAPTERS[p["format"]](base, get_key(code), settings["models"][code], config.AI_TIMEOUT_SECONDS)
+    key = get_key(code)
+    if not key and not (code == "custom" and _local(base)):
+        raise PolishError("auth", "No API key found in this computer's key store — add it again in the Corrections tab")
+    adapter = ADAPTERS[p["format"]](base, key, settings["models"][code], config.AI_TIMEOUT_SECONDS)
     if code == "anthropic":
         adapter.workspace_id = settings.get("anthropic_workspace_id", "")
     return adapter
