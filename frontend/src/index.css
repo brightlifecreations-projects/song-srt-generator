@@ -1045,3 +1045,57 @@ textarea.lyrics::placeholder { color: var(--muted); }
   border: 1px solid var(--line-strong); border-radius: 8px;
 }
 .modelpick-filter { margin-bottom: 4px; }
+
+/* ---------- Updates page + sidebar dot (V4.5) ---------- */
+.navicon { position: relative; display: inline-flex; flex-shrink: 0; }
+.navdot { position: absolute; top: -2px; right: -3px; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 0 2px var(--panel); }
+.updatespage { display: flex; flex-direction: column; gap: 18px; max-width: 760px; }
+.updatespage[hidden] { display: none; }
+.upd-hero { display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; }
+.upd-version { font-family: var(--font-display); font-size: 40px; font-weight: 560; line-height: 1.1; margin-top: 4px; }
+.upd-check { width: auto; min-width: 230px; margin-top: 0; justify-content: center; }
+.upd-status { font-size: 15px; font-weight: 600; }
+.upd-status.ok { color: var(--ok); }
+.upd-available { border-color: var(--accent); }
+.upd-notes { margin-top: 14px; font-size: 14px; line-height: 1.6; color: var(--ink-soft); max-height: 360px; overflow-y: auto; }
+.upd-notes h2, .upd-notes h3 { font-size: 15px; color: var(--ink); margin: 10px 0 4px; }
+.upd-notes ul { padding-left: 20px; }
+.upd-notes.plain { white-space: pre-wrap; font-family: var(--font-body); }
+
+/* ---------- Review panel (V4.5) ---------- */
+.wave-sub { margin-top: 10px; padding: 10px 14px; border-radius: 8px; background: rgba(0, 0, 0, 0.78); color: #fff;
+  font-size: 15px; font-weight: 600; text-align: center; min-height: 42px; }
+.wave-sub .muted { color: rgba(255, 255, 255, 0.4); }
+.review { display: flex; flex-direction: column; gap: 12px; }
+.review-transport { display: flex; align-items: center; gap: 12px; }
+.review-transport .scrubber { flex: 1; accent-color: var(--accent); }
+.review-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.review-tools .spacer { flex: 1; }
+.review-tools .check.loop { margin: 0; font-size: 13px; }
+.review-issues { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.review-list { max-height: 460px; }
+.rcue { display: grid; grid-template-columns: 30px 64px 1fr; gap: 10px; padding: 9px 14px; border-top: 1px solid var(--line);
+  cursor: pointer; align-items: start; }
+.rcue:hover { background: var(--panel-2); }
+.rcue.playing { background: var(--accent-soft); }
+.rcue.on { box-shadow: inset 3px 0 0 var(--accent); background: var(--accent-soft); cursor: default; }
+.rcue.bad .cue-num { color: var(--warn); }
+.rcue .cue-time { line-height: 1.5; }
+.rcue-text { font-size: 14px; line-height: 1.45; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.rcue-text input { font: inherit; padding: 4px 8px; border: 1px solid var(--accent); border-radius: 6px; background: var(--paper); color: var(--ink); width: 100%; }
+.rcue-bad { color: var(--warn); font-size: 11.5px; }
+.rcue-tools { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 6px 14px; padding-top: 6px; }
+.nudge { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
+.nudge button { font: inherit; font-size: 12px; padding: 3px 8px; border: 1px solid var(--line-strong); border-radius: 6px;
+  background: var(--panel); color: var(--ink-soft); cursor: pointer; }
+.nudge button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.nudge button:disabled { opacity: 0.45; cursor: default; }
+.nudge button.danger { color: var(--leak); }
+.edited-badge { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 999px; background: var(--accent); color: var(--accent-ink); margin-left: 8px; vertical-align: middle; }
+.dl-side { display: flex; flex-direction: column; gap: 8px; }
+.dl-side .dl-secondary { flex: 1; }
+.review-save { margin: 0; }
+/* A long Review panel scrolls inside the sticky output column; the player never shrinks (V4.5). */
+.stagecol > * { flex-shrink: 0; }

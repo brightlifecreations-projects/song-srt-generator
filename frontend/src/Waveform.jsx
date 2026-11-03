@@ -9,8 +9,9 @@ function fmt(t) {
 }
 
 /** Scrubbable waveform. source: the picked File, or a URL (a video's extracted audio).
-    Exposes seekTo(seconds) via ref. */
-const Waveform = forwardRef(function Waveform({ source, name, scanning, onTime }, ref) {
+    subtitle: the cue to draw under the waveform (Review panel). Exposes seekTo(seconds) (seek and
+    play), seek(seconds), play(), pause() and toggle() via ref; onDuration/onPlaying report back. */
+const Waveform = forwardRef(function Waveform({ source, name, scanning, onTime, subtitle, onDuration, onPlaying }, ref) {
   const holderRef = useRef(null);
   const wsRef = useRef(null);
   const [playing, setPlaying] = useState(false);
@@ -35,9 +36,10 @@ const Waveform = forwardRef(function Waveform({ source, name, scanning, onTime }
     const isFile = typeof source !== "string";
     const url = isFile ? URL.createObjectURL(source) : source;
     ws.load(url);
-    ws.on("ready", () => setDuration(ws.getDuration()));
-    ws.on("play", () => setPlaying(true));
-    ws.on("pause", () => setPlaying(false));
+    ws.on("ready", () => { setDuration(ws.getDuration()); onDuration?.(ws.getDuration()); });
+    ws.on("play", () => { setPlaying(true); onPlaying?.(true); });
+    ws.on("pause", () => { setPlaying(false); onPlaying?.(false); });
+    ws.on("seeking", (t) => { setTime(t); onTime && onTime(t); });
     ws.on("timeupdate", (t) => { setTime(t); onTime && onTime(t); });
     wsRef.current = ws;
     return () => { ws.destroy(); if (isFile) URL.revokeObjectURL(url); wsRef.current = null; };
@@ -68,6 +70,13 @@ const Waveform = forwardRef(function Waveform({ source, name, scanning, onTime }
       ws.setTime(Math.max(0, Math.min(seconds, ws.getDuration())));
       ws.play();
     },
+    seek(seconds) {
+      const ws = wsRef.current;
+      if (ws && ws.getDuration()) ws.setTime(Math.max(0, Math.min(seconds, ws.getDuration())));
+    },
+    play() { wsRef.current?.play(); },
+    pause() { wsRef.current?.pause(); },
+    toggle() { wsRef.current?.playPause(); },
   }));
 
   return (
@@ -80,6 +89,9 @@ const Waveform = forwardRef(function Waveform({ source, name, scanning, onTime }
         <div ref={holderRef} />
         {scanning && <div className="wave-scan" />}
       </div>
+      {subtitle !== undefined && (
+        <div className="wave-sub" data-testid="wave-sub">{subtitle || <span className="muted">—</span>}</div>
+      )}
       <div className="player-row">
         <button
           className="playbtn"

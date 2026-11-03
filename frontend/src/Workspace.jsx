@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "motion/react";
 import Waveform from "./Waveform.jsx";
 import VideoPreview from "./VideoPreview.jsx";
 import DraftEditor, { liveMarks } from "./DraftEditor.jsx";
+import Review from "./Review.jsx";
 
 /* Step titles come from the server per flow (job.steps); this maps them to the
    live label shown while the step runs. */
@@ -368,6 +369,13 @@ export default function Workspace({ section, preset, meta, active }) {
   // Words replaced from the corrections file: [{id, line, start, original, replacement}]
   const [marks, setMarks] = useState([]);
   const [playTime, setPlayTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  // Review panel (V4.5): the cues as edited, a key that resets it for each new SRT, and the
+  // job's own audio when the page was reopened (the picked file is gone then).
+  const [reviewCues, setReviewCues] = useState(null);
+  const [reviewKey, setReviewKey] = useState(0);
+  const [restoredAudio, setRestoredAudio] = useState(null);
 
   const playerRef = useRef(null);
   const audioInput = useRef(null);
@@ -394,12 +402,38 @@ export default function Workspace({ section, preset, meta, active }) {
 
   useEffect(() => () => clearInterval(pollRef.current), []);
 
+  /** A finished SRT: show the Review panel, and remember the job so it comes back after a reload. */
+  function finished(s) {
+    setPhase(s.status);
+    if (s.status === "done") {
+      setReviewCues(null);
+      setReviewKey(k => k + 1);
+      store(`srt-${section}-review`, s.id || "");
+    }
+  }
+
+  // Reopened page: bring back the last reviewed job if the app still has it.
+  useEffect(() => {
+    const id = stored(`srt-${section}-review`, "");
+    if (!id) return;
+    fetch(`/api/jobs/${id}`).then(r => (r.ok ? r.json() : null)).then(s => {
+      if (!s || s.status !== "done" || file) return;
+      setJob({ ...s, id });
+      setModeState(s.mode === "transcribe" ? "transcribe" : "lyrics");
+      setRestoredAudio(`/api/jobs/${id}/audio`);
+      setPhase("done");
+      setReviewKey(k => k + 1);
+    }).catch(() => {});
+  }, []);
+
   function resetRun() {
     clearInterval(pollRef.current);
     setPhase("idle");
     setJob(null);
     setDraft(null);
     setMarks([]);
+    setReviewCues(null);
+    setRestoredAudio(null);
   }
 
   function setMode(m) {
@@ -424,7 +458,7 @@ export default function Workspace({ section, preset, meta, active }) {
         setJob({ ...s, id: jobId });
         if (["done", "error", "draft"].includes(s.status)) {
           clearInterval(pollRef.current);
-          onSettled(s);
+          onSettled({ ...s, id: jobId });
         }
       } catch { /* server briefly busy; keep polling */ }
     }, 500);
@@ -464,7 +498,7 @@ export default function Workspace({ section, preset, meta, active }) {
     setJob(null);
     submit("/api/jobs", {
       ...fileFields(), lyrics, strip_tags: stripTags, video_format: format, language,
-    }, s => setPhase(s.status));
+    }, s => finished(s));
   }
 
   function transcribe() {
@@ -507,11 +541,13 @@ export default function Workspace({ section, preset, meta, active }) {
     });
   }
 
+  function approveDone(s) { finished(s); }
+
   function approve() {
     if (!job?.id || !lyrics.trim() || working) return;
     submit(`/api/jobs/${job.id}/approve`, {
       lyrics, strip_tags: false, video_format: format, language,
-    }, s => setPhase(s.status));
+    }, s => approveDone(s));
   }
 
   function pickAudio(f) {
@@ -564,7 +600,7 @@ export default function Workspace({ section, preset, meta, active }) {
   const autoLive = live.filter(m => m.kind === "auto").length;
   const steps = job?.steps || DEFAULT_STEPS;
   const stageIdx = job?.stage ? job.stage - 1 : 0;
-  const cues = phase === "done" ? job?.cues || [] : [];
+  const cues = phase === "done" ? reviewCues || job?.edited_cues || job?.cues || [] : [];
   const activeCue = cues.findIndex(c => playTime >= c.start && playTime < c.end);
   const hasDraft = transcribing && draft && job?.id;
   const ready = file && !working && (transcribing ? (!hasDraft || lyrics.trim()) : lyrics.trim());
@@ -573,7 +609,7 @@ export default function Workspace({ section, preset, meta, active }) {
     .reduce((sum, [, v]) => sum + v, 0);
   // Audio files show a waveform. Videos play themselves, or the server's preview copy when the
   // web view can't decode them.
-  const waveSource = !isVideo ? file : null;
+  const waveSource = !isVideo ? file || restoredAudio : null;
   const videoFallback = isVideo && videoPlayable === false && job?.has_preview && job?.id
     ? `/api/jobs/${job.id}/preview` : null;
   const isolating = isolate === "on" || (isolate === "auto" && job?.music_detected);
@@ -831,10 +867,12 @@ export default function Workspace({ section, preset, meta, active }) {
           {isVideo ? (
             <VideoPreview ref={playerRef} file={file} fallbackSrc={videoFallback} cues={cues}
               format={format} onTime={setPlayTime} onPlayable={setVideoPlayable}
-              processing={working} />
+              processing={working} onDuration={setDuration} onPlaying={setPlaying} />
           ) : waveSource ? (
-            <Waveform ref={playerRef} source={waveSource} name={file.name}
-              scanning={working && stageIdx === 0 && isolating} onTime={setPlayTime} />
+            <Waveform ref={playerRef} source={waveSource} name={file ? file.name : job?.job_dir || "Job audio"}
+              scanning={working && stageIdx === 0 && isolating} onTime={setPlayTime}
+              subtitle={phase === "done" ? (cues[activeCue]?.text || "") : undefined}
+              onDuration={setDuration} onPlaying={setPlaying} />
           ) : (
             <div className="wavecard">
               <div className="wavecard-head">
@@ -903,19 +941,8 @@ export default function Workspace({ section, preset, meta, active }) {
 
                 {(job.warnings || []).map(w => <div key={w} className="warnbox">{w}</div>)}
 
-                <div className="download-row">
-                  <a className="dl-primary" href={`/api/jobs/${job.id}/srt`}>
-                    <span>
-                      <b>Download SRT</b>
-                      <span>{job.srt_name} · {cues.length} cues · saved in jobs/{job.job_dir}</span>
-                    </span>
-                    <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"><path d="M8 2v9M4.5 7.5 8 11l3.5-3.5" /><path d="M2.5 13.5h11" /></svg>
-                  </a>
-                  {job.has_vocals && <a className="dl-secondary" href={`/api/jobs/${job.id}/vocals`}>Isolated {section === "song" ? "vocals" : "voice"}</a>}
-                </div>
-
                 {transcribing && (
-                  <p className="stage-note">Spotted a wrong word? Fix it on the left and approve again — it reuses this job's audio.</p>
+                  <p className="stage-note">Edit the subtitles below, or fix the draft on the left and approve again — it reuses this job's audio.</p>
                 )}
                 {transcribing && job.corrections_recorded && (
                   <p className="stage-note learned-note" data-testid="learned">
@@ -926,25 +953,12 @@ export default function Workspace({ section, preset, meta, active }) {
                   </p>
                 )}
 
-                <div className="cuecard">
-                  <div className="cuecard-head">
-                    <span className="cuecard-title">Subtitle preview</span>
-                    <span className="cuecard-hint">Click a line to {isVideo ? "see" : "hear"} it</span>
-                  </div>
-                  <div className="cuelist">
-                    {cues.map((c, i) => (
-                      <button
-                        key={c.index}
-                        className={`cue${i === activeCue ? " playing" : ""}`}
-                        onClick={() => playerRef.current?.seekTo(c.start + 0.01)}
-                      >
-                        <span className="cue-num">{String(c.index).padStart(2, "0")}</span>
-                        <span className="cue-time">{fmtCue(c.start)}</span>
-                        <span className="cue-text">{c.text}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                <Review key={`${job.id}-${reviewKey}`} jobId={job.id}
+                  initialCues={(job.edited_cues || job.cues || []).map(c => ({ start: c.start, end: c.end, text: c.text }))}
+                  edited={!!job.edited} cap={job.max_chars} player={playerRef} time={playTime}
+                  duration={duration} playing={playing} active={active} onCues={setReviewCues}
+                  srtName={job.srt_name} hasVocals={job.has_vocals}
+                  vocalsLabel={`Isolated ${section === "song" ? "vocals" : "voice"}`} />
               </motion.div>
             )}
           </AnimatePresence>

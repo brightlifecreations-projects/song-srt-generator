@@ -1307,6 +1307,12 @@ def align_and_write(ctx: dict, lyrics_text: str, strip_tags: bool = True,
         cues = sanitize_cues(chunk_segments(segments, max_chars, max_seconds, pause_split, max_words))
         srt_path = job_dir / f"{ctx['stem']}.srt"
         write_srt(cues, srt_path)
+        # The Review panel (V4.5) edits a copy; a new alignment starts from scratch.
+        original_srt = job_dir / "original.srt"
+        shutil.copyfile(srt_path, original_srt)
+        for stale in ("edited.srt", "edited-cues.json"):
+            (job_dir / stale).unlink(missing_ok=True)
+        ctx.update(align_language=language, whisper_language_used=whisper_language, review_recorded={})
 
         cues_json = {
             "source_file": ctx["source_file"],
@@ -1352,6 +1358,8 @@ def align_and_write(ctx: dict, lyrics_text: str, strip_tags: bool = True,
         log.info("Outputs written in %.1fs. Timings: %s", timings["outputs_seconds"], timings)
         return {
             "srt_path": srt_path,
+            "original_srt_path": original_srt,
+            "max_chars": max_chars,
             "stem_path": stem_path,
             "audio_path": ctx["input_audio"],
             "cues_path": job_dir / "cues.json",
