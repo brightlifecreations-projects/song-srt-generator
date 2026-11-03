@@ -606,7 +606,8 @@ async def ai_put(request: Request):
                 "provider": body.get("provider") if body.get("provider") in ai_polish.PROVIDERS
                 else current["provider"],
                 "models": models, "custom_base_url": body.get("custom_base_url", current["custom_base_url"]),
-                "anthropic_workspace_id": body.get("anthropic_workspace_id", current["anthropic_workspace_id"])}
+                "anthropic_workspace_id": body.get("anthropic_workspace_id", current["anthropic_workspace_id"]),
+                "keys_saved": current["keys_saved"]}  # changed only by saving or removing a key
     if settings["enabled"] and not ai_polish.usable(settings)[0]:
         settings["enabled"] = False  # off until it can actually run (a key, a model, a URL)
     ai_polish.save_settings(settings)
