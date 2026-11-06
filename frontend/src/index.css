@@ -1099,3 +1099,34 @@ textarea.lyrics::placeholder { color: var(--muted); }
 .review-save { margin: 0; }
 /* A long Review panel scrolls inside the sticky output column; the player never shrinks (V4.5). */
 .stagecol > * { flex-shrink: 0; }
+
+/* ---- V4.6: caption mode, caption limits, final AI check highlights, numbers kept in words ---- */
+.capmode .segment { flex: 1; }
+.review-mode { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 10px 0 2px; font-size: 13px; }
+.review-mode .capmode { flex: 0 1 auto; }
+.review-mode .ai-count b { color: var(--accent); }
+.caplimits { display: flex; flex-direction: column; gap: 8px; }
+.caplimit { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.caplimit input {
+  width: 64px; font: inherit; color: var(--ink); background: var(--panel);
+  border: 1px solid var(--line-strong); border-radius: 8px; padding: 5px 8px;
+}
+.ai-fix {
+  position: relative; background: var(--accent-soft); border-bottom: 2px solid var(--accent);
+  border-radius: 3px; padding: 0 1px; cursor: help; outline: none;
+}
+.ai-fix-pop {
+  display: none; position: absolute; left: 0; top: calc(100% + 4px); z-index: 20; white-space: nowrap;
+  background: var(--panel); color: var(--ink-soft); border: 1px solid var(--line-strong); border-radius: 8px;
+  box-shadow: var(--shadow); padding: 5px 6px 5px 10px; font-size: 12px; align-items: center; gap: 8px;
+}
+.ai-fix:hover .ai-fix-pop, .ai-fix:focus-within .ai-fix-pop { display: inline-flex; }
+.ai-fix-pop button {
+  font: inherit; font-size: 12px; border: 1px solid var(--line-strong); background: var(--panel-2);
+  color: var(--ink); border-radius: 6px; padding: 2px 8px; cursor: pointer;
+}
+.numbers-list {
+  width: 100%; box-sizing: border-box; font: 13px/1.6 var(--font-mono); color: var(--ink);
+  background: var(--panel); border: 1px solid var(--line-strong); border-radius: 8px; padding: 10px 12px;
+  margin-top: 10px; resize: vertical;
+}

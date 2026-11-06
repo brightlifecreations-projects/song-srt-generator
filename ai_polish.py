@@ -74,6 +74,8 @@ def load_settings() -> dict:
     return {"enabled": bool(saved.get("enabled")), "provider": provider, "models": models,
             # Polish every new draft automatically (V4.4); off = only when "Polish" is clicked.
             "auto": saved.get("auto", True) is not False,
+            # Final AI check before output (V4.6), on by default whenever a provider is set up.
+            "final_check": saved.get("final_check", True) is not False,
             "custom_base_url": saved.get("custom_base_url", ""),
             "anthropic_workspace_id": saved.get("anthropic_workspace_id", ""),
             # Which providers have a key saved — names only. Keeps the key store from being read
@@ -83,6 +85,7 @@ def load_settings() -> dict:
 
 def save_settings(settings: dict):
     clean = {"enabled": bool(settings.get("enabled")), "auto": settings.get("auto", True) is not False,
+             "final_check": settings.get("final_check", True) is not False,
              "provider": settings.get("provider", "anthropic"),
              "models": {k: str(v).strip() for k, v in (settings.get("models") or {}).items() if k in PROVIDERS},
              "custom_base_url": str(settings.get("custom_base_url", "")).strip(),
@@ -215,7 +218,7 @@ class Adapter:
     def __init__(self, base_url: str, key: str | None, model: str, timeout: float):
         self.base_url, self.key, self.model, self.timeout = base_url.rstrip("/"), key, model, timeout
 
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, system: str, user: str, schema: dict | None = None) -> str:
         raise NotImplementedError
 
     def _post(self, url: str, payload: dict, headers: dict) -> dict:
@@ -244,7 +247,7 @@ class AnthropicAdapter(Adapter):
 
     workspace_id = ""  # for keys not scoped to a workspace (anthropic-workspace-id header)
 
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, system: str, user: str, schema: dict | None = None) -> str:
         import anthropic
 
         headers = {"anthropic-workspace-id": self.workspace_id} if self.workspace_id else None
@@ -252,7 +255,7 @@ class AnthropicAdapter(Adapter):
                                      max_retries=1, default_headers=headers)
         kwargs = {"model": self.model, "max_tokens": 16000, "system": system,
                   "messages": [{"role": "user", "content": user}],
-                  "output_config": {"format": {"type": "json_schema", "schema": RESPONSE_SCHEMA}}}
+                  "output_config": {"format": {"type": "json_schema", "schema": schema or RESPONSE_SCHEMA}}}
         if self.model in FALLBACK_MODELS:  # a declined request is re-run on Anthropic's pick, server-side
             kwargs.update(betas=["server-side-fallback-2026-07-01"], fallbacks="default")
         try:
@@ -288,7 +291,7 @@ class AnthropicAdapter(Adapter):
 class OpenAIAdapter(Adapter):
     """OpenAI's Chat Completions format: OpenAI, OpenRouter and every OpenAI-compatible server."""
 
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, system: str, user: str, schema: dict | None = None) -> str:
         headers = {"Authorization": f"Bearer {self.key}"} if self.key else {}
         headers["X-Title"] = "SRT Generator"  # OpenRouter's app label; ignored elsewhere
         payload = {"model": self.model, "response_format": {"type": "json_object"},
@@ -309,7 +312,7 @@ class OpenAIAdapter(Adapter):
 class GeminiAdapter(Adapter):
     """Google's generateContent API. The key goes in a header, never the URL (URLs end up in errors)."""
 
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, system: str, user: str, schema: dict | None = None) -> str:
         payload = {"systemInstruction": {"parts": [{"text": system}]},
                    "contents": [{"role": "user", "parts": [{"text": user}]}],
                    "generationConfig": {"responseMimeType": "application/json"}}

@@ -130,6 +130,9 @@ class AdapterTests(unittest.TestCase):
         self.check_all("badjson", "invalid")
 
     def test_offline(self):
+        # Windows takes about 2 s to refuse a connection to a closed localhost port (it retries the
+        # SYN), so the short test timeout would fire first and report "timeout".
+        ai_polish.config.AI_TIMEOUT_SECONDS = 6
         self.check_all("ok", "offline", offline=True)
 
     def test_bad_key(self):

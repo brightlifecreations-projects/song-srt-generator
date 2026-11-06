@@ -141,7 +141,7 @@ def run(base: str, name: str) -> dict:
     t0 = time.time()
     if mode == "lyrics":
         lyrics = opts["lyrics"]
-        lyrics = (ROOT / "sample" / "lyrics.txt").read_text() if lyrics == "sample" else lyrics()
+        lyrics = (ROOT / "sample" / "lyrics.txt").read_text(encoding="utf-8") if lyrics == "sample" else lyrics()
         job = post(base, "/api/jobs", {"lyrics": lyrics, "video_format": fmt, "language": opts["language"],
                                        "section": section}, path)
         state = wait(base, job["job_id"])
@@ -166,7 +166,7 @@ def run(base: str, name: str) -> dict:
     job_dir = ROOT / "jobs" / state["job_dir"]
     data_dir = job_dir if job_dir.exists() else None
     problems = check_srt(srt, section, 42 if fmt == "horizontal" else 25)
-    cues_json = json.loads((data_dir / "cues.json").read_text()) if data_dir else {}
+    cues_json = json.loads((data_dir / "cues.json").read_text(encoding="utf-8")) if data_dir else {}
     if data_dir and cues_json.get("section") != section:
         problems.append("section not recorded in cues.json")
     out = {"case": name, "result": "FAIL" if problems else "pass", "cues": len(state["cues"]),

@@ -92,14 +92,18 @@ log("delete:", rows().length, "cues");
 rows()[0].click(); await sleep(300);
 for (let k = 0; k < 40; k++) { btn("End +0.1 s").click(); await sleep(20); }
 await sleep(300);
-log("issues shown:", ws().querySelector("[data-testid=issues]")?.textContent);
+const issues = ws().querySelector("[data-testid=issues]")?.textContent || "";
+// V4.6: "too short" is 0.08 s (was 0.3 s), so the nudged and split cues above aren't flagged; only the overlap is.
+log("issues shown:", issues, "| overlap only:", /overlap/.test(issues) && !/shorter than/.test(issues));
 ws().querySelector("[data-testid=autofix]").click(); await sleep(400);
-log("after Fix automatically:", ws().querySelector("[data-testid=issues]")?.textContent || "no issues", "|", times().slice(0, 2));
+const left = ws().querySelector("[data-testid=issues]")?.textContent;
+log("after Fix automatically:", left || "no issues", "| cleared:", !left, "|", times().slice(0, 2));
 // re-time a line after a big text change
-const gi = cueText().findIndex(x => x.startsWith("gonna"));
+// V4.6 drops the first lyric line (not sung in the clip), so the re-time target is a line that is.
+const gi = cueText().findIndex(x => x.startsWith("then"));
 rows()[gi].click(); await sleep(300);
 key("Enter"); await sleep(200);
-inp = sel().querySelector("input"); setVal(inp, "gonna come back");
+inp = sel().querySelector("input"); setVal(inp, "then it was not");
 inp.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); await sleep(400);
 rows()[gi].click(); await sleep(300);
 const rt0 = times()[gi];
@@ -112,8 +116,8 @@ await sleep(1500);  // autosave
 log("Edited badge:", !!ws().querySelector("[data-testid=edited-badge]"));
 const edited = await (await fetch(ws().querySelector("[data-testid=dl-srt]").getAttribute("href"))).text();
 const original = await (await fetch(ws().querySelector("[data-testid=dl-original]").getAttribute("href"))).text();
-const valid = srt => srt.trim().split(/\n\n+/).every((b, i) => { const l = b.split("\n"); return l[0] === String(i + 1) && /^\d\d:\d\d:\d\d,\d{3} --> \d\d:\d\d:\d\d,\d{3}$/.test(l[1]) && l[2]; });
-log("edited SRT valid:", valid(edited), "| has edits:", edited.includes("If it is meant to be it") && edited.includes("gonna come back\n"), "| original unchanged:", original.includes("If it is meant to be it's"), "| differ:", edited !== original);
+const valid = srt => srt.replace(/\r\n/g, "\n").trim().split(/\n\n+/).every((b, i) => { const l = b.split("\n"); return l[0] === String(i + 1) && /^\d\d:\d\d:\d\d,\d{3} --> \d\d:\d\d:\d\d,\d{3}$/.test(l[1]) && l[2]; });
+log("edited SRT valid:", valid(edited), "| has edits:", edited.includes("If it is meant to be it") && edited.includes("then it was not\r\n"), "| original unchanged:", original.includes("If it's not,"), "| differ:", edited !== original);
 const corr = await (await fetch("/api/corrections")).json();
 log("corrections learnt from the edits:", corr.tables.flatMap(t => t.rows.filter(r => r.last_seen === new Date().toISOString().slice(0, 10)).map(r => `${r.wrong}→${r.correct} [${r.source}]`)));
 // leave the page and come back

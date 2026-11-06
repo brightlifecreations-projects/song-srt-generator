@@ -19,6 +19,20 @@ if not "%PROCESSOR_ARCHITECTURE%"=="AMD64" (
   exit /b 1
 )
 
+REM Windows' 260-character path limit: the app's Python packages nest deep folders, so a long
+REM folder path can make the install fail. Warn (but carry on) unless long paths are switched on.
+REM (goto, not a ( ) block: a path like "Program Files (x86)" would break the block.)
+set "HERE=%~dp0"
+"%SystemRoot%\System32\reg.exe" query "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled 2>nul | "%SystemRoot%\System32\find.exe" "0x1" >nul
+if not errorlevel 1 goto :pathok
+if "%HERE:~70,1%"=="" goto :pathok
+echo ! This folder's path is long:
+echo   %HERE%
+echo   Windows may refuse some of the app's files. If the install fails, move this
+echo   folder somewhere short, like C:\SRT-Generator, and run Install.bat again.
+echo.
+:pathok
+
 REM Bundled tools: uv (installs a private Python), ffmpeg/ffprobe (audio handling).
 if not exist "bin\uv.exe" goto :missingbin
 if not exist "bin\ffmpeg.exe" goto :missingbin

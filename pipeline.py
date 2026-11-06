@@ -30,6 +30,7 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 
+import captions
 import config
 import corrections
 
@@ -82,9 +83,6 @@ def clean_section(section: str | None) -> str:
 def clean_isolate(isolate: str | None, section: str) -> str:
     return isolate if isolate in ISOLATE_CHOICES else config.SECTIONS[section]["isolate"]
 
-MIN_CUE_SECONDS = 0.6
-OVERLAP_GAP = 0.010  # 10 ms pulled between overlapping cues
-
 # Lazily loaded, cached across jobs so only the first run pays model-load time.
 _align_model = None
 _separator = None
@@ -108,7 +106,7 @@ def probe_duration(audio_path: Path) -> float:
         out = subprocess.run(
             [FFPROBE, "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
         )
     except FileNotFoundError:
         raise PipelineError(
@@ -124,7 +122,7 @@ def _has_audio_stream(path: Path) -> bool:
     out = subprocess.run(
         [FFPROBE, "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
          "-of", "csv=p=0", str(path)],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
     )
     return bool(out.stdout.strip())
 
@@ -197,7 +195,7 @@ def extract_audio(video_path: Path, out_path: Path) -> Path:
     proc = subprocess.run(
         [FFMPEG, "-y", "-v", "error", "-i", str(video_path), "-map", "0:a:0", "-vn",
          "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", str(out_path)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0 or not out_path.exists():
         raise PipelineError(
@@ -215,7 +213,7 @@ def make_preview(video_path: Path, out_path: Path) -> Path | None:
          "-vf", "scale=-2:'min(720,ih)'", "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
          "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
          str(out_path)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     return out_path if proc.returncode == 0 and out_path.exists() else None
 
@@ -228,7 +226,7 @@ MUSIC_CHECK_SECONDS = 30.0
 
 def _mean_volume_db(args: list[str]) -> float:
     proc = subprocess.run([FFMPEG, "-v", "info", *args, "-f", "null", "-"],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, encoding="utf-8", errors="replace")
     match = re.search(r"mean_volume: (-?[\d.]+|-inf) dB", proc.stderr)
     return float(match.group(1)) if match else -91.0
 
@@ -245,7 +243,7 @@ def detect_music(audio_path: Path, duration: float, job_dir: Path, log: logging.
     subprocess.run([FFMPEG, "-y", "-v", "error", "-ss", f"{start:.2f}", "-i", str(audio_path),
                     *([] if whole else ["-t", str(MUSIC_CHECK_SECONDS)]),
                     "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", str(excerpt)],
-                   capture_output=True, text=True, check=True)
+                   capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
     vocals = separate_vocals(excerpt, check_dir, log)
     voice_db = _mean_volume_db(["-i", str(vocals), "-af", "volumedetect"])
     background_db = _mean_volume_db([
@@ -269,9 +267,18 @@ def detect_music(audio_path: Path, duration: float, job_dir: Path, log: logging.
 # ---------------------------------------------------------------------------
 # Stage 2: vocal isolation
 
+def separator_engine() -> str:
+    """config.SEPARATOR_ENGINE, with "auto" resolved: mlx on Apple Silicon macOS, cpu elsewhere."""
+    engine = config.SEPARATOR_ENGINE
+    if engine not in ("mlx", "cpu"):
+        import platform
+        engine = "mlx" if sys.platform == "darwin" and platform.machine() == "arm64" else "cpu"
+    return engine
+
+
 def separate_vocals(audio_path: Path, job_dir: Path, log: logging.Logger) -> Path:
     """Isolate the vocal stem into job_dir/vocals.wav using the configured engine."""
-    if config.SEPARATOR_ENGINE == "mlx":
+    if separator_engine() == "mlx":
         return _separate_mlx(audio_path, job_dir, log)
     return _separate_cpu(audio_path, job_dir, log)
 
@@ -297,7 +304,7 @@ def _run_separator(separator_cls, audio_path: Path, job_dir: Path) -> Path:
     to this job's folder.
     """
     global _separator, _separator_key
-    key = (config.SEPARATOR_ENGINE, config.SEPARATOR_MODEL)
+    key = (separator_engine(), config.SEPARATOR_MODEL)
     if _separator is None or _separator_key != key:
         _separator = separator_cls(
             log_level=logging.INFO,
@@ -428,7 +435,7 @@ SILENCE_DB = -60.0
 def _max_volume_db(audio_path: Path) -> float:
     proc = subprocess.run(
         [FFMPEG, "-v", "info", "-i", str(audio_path), "-af", "volumedetect", "-f", "null", "-"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     match = re.search(r"max_volume: (-?[\d.]+) dB", proc.stderr)
     return float(match.group(1)) if match else 0.0  # unknown: assume there's sound
@@ -634,159 +641,83 @@ def script_note(choice: str, detected: str, draft: str, script: str = "same",
 
 
 # ---------------------------------------------------------------------------
-# Stage 3.5: chunk aligned lines into screen-sized cues
+# Stage 3.5: captions (V4.6: captions.py builds them from the aligned words)
 
-# A word ending in clause/sentence punctuation always ends the cue. Includes the
-# Devanagari danda (। ॥) and Urdu full stop, comma, question mark and semicolon (۔ ، ؟ ؛).
-PUNCT_BREAK = re.compile(r"[,.;:!?…।॥۔،؟؛]['\"\)\]]*$")
-# A word opening with Spanish ¿ or ¡ always starts a new cue.
-OPENING_PUNCT = re.compile(r"^['\"\(\[]*[¿¡]")
-
-# Unicode categories that don't take a character cell of their own: combining marks
-# (Devanagari/Gurmukhi vowel signs, virama, anusvara, nukta…) and joiners (ZWJ/ZWNJ).
-_ZERO_WIDTH_CATEGORIES = {"Mn", "Mc", "Me", "Cf"}
+CAPTION_MODES = ("line", "word")
 
 
-def _display_len(text: str) -> int:
-    """Character count for the line caps, not counting combining marks or joiners."""
-    return sum(1 for ch in text if unicodedata.category(ch) not in _ZERO_WIDTH_CATEGORIES)
+def caption_rules(section: str, video_format: str, mode: str = None, transcribe: bool = False,
+                  max_words=None, max_chars=None, merge_short=None, language: str | None = None) -> dict:
+    """The caption rules for a job: the section's limits plus the V4.6 TikTok rules, with the
+    user's own max words / max characters / merge-short choices when given."""
+    mode = mode if mode in CAPTION_MODES else config.CAPTION_MODE_DEFAULT
+    words = _int_in(max_words, 1, 12) or config.MAX_WORDS_PER_CAPTION
+    chars = _int_in(max_chars, 10, 80)
+    return captions.rules_for(
+        config.SECTIONS[section], video_format, mode=mode, transcribe=transcribe, language=language,
+        max_words=words,
+        max_chars_vertical=chars or config.MAX_CHARS_VERTICAL,
+        max_chars_horizontal=chars or config.MAX_CHARS_HORIZONTAL,
+        merge_short=config.MERGE_SHORT_DEFAULT if merge_short is None else bool(merge_short),
+        merge_short_seconds=config.MERGE_SHORT_SECONDS, end_tail=config.CAPTION_END_TAIL,
+        word_gap_fill=config.WORD_GAP_FILL_SECONDS, transcribe_pause=config.TRANSCRIBE_PAUSE_SECONDS)
 
 
-def _split_run(run: list, max_chars: int) -> list[list]:
-    """Split a punctuation-free word run into balanced pieces of at most max_chars."""
-    text = " ".join(w.word.strip() for w in run)
-    text_len = _display_len(text)
-    if text_len <= max_chars:
-        return [run]
-    target = text_len / math.ceil(text_len / max_chars)
-    pieces, cur, cur_len = [], [], 0
-    for w in run:
-        wlen = _display_len(w.word.strip()) + (1 if cur else 0)
-        if cur and (cur_len + wlen > max_chars or cur_len >= target):
-            pieces.append(cur)
-            cur, cur_len = [], 0
-            wlen = _display_len(w.word.strip())
-        cur.append(w)
-        cur_len += wlen
-    if cur:
-        pieces.append(cur)
-    return pieces
+def _int_in(value, low: int, high: int) -> int | None:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if low <= n <= high else None
 
 
-def _split_by_duration(piece: list, max_seconds: float | None) -> list[list]:
-    """Split a cue's words into balanced pieces of at most max_seconds (word boundaries only)."""
-    if not max_seconds or len(piece) < 2 or piece[-1].end - piece[0].start <= max_seconds:
-        return [piece]
-    target = (piece[-1].end - piece[0].start) / math.ceil((piece[-1].end - piece[0].start) / max_seconds)
-    pieces, cur = [], []
-    for w in piece:
-        if cur and (w.end - cur[0].start > max_seconds or w.start - cur[0].start >= target):
-            pieces.append(cur)
-            cur = []
-        cur.append(w)
-    pieces.append(cur)
-    return pieces
+NUMBER_EXCEPTIONS_FILE = "number-exceptions.txt"
 
 
-def _split_by_words(piece: list, max_words: int | None) -> list[list]:
-    """Split a cue's words into balanced pieces of at most max_words words."""
-    if not max_words or len(piece) <= max_words:
-        return [piece]
-    count = math.ceil(len(piece) / max_words)
-    size, extra = divmod(len(piece), count)
-    pieces, pos = [], 0
-    for i in range(count):
-        n = size + (1 if i < extra else 0)
-        pieces.append(piece[pos:pos + n])
-        pos += n
-    return pieces
-
-
-def chunk_segments(segments, max_chars: int, max_seconds: float | None = None,
-                   pause_split: float | None = None, max_words: int | None = None) -> list[dict]:
-    """Turn aligned lyric lines into single-line cues.
-
-    Rules (in priority order): never merge across the user's lyric lines; a comma or
-    full stop always ends a cue, and an opening ¿ or ¡ always starts one; with pause_split,
-    a silence that long between two words starts a new cue; no cue exceeds max_chars
-    (split at the most balanced word boundary), max_words or max_seconds; cue times come
-    from word-level timestamps. The section (config.SECTIONS) supplies the optional limits.
-    """
-    cues = []
-    for seg in segments:
-        words = [w for w in seg.words if w.word.strip()]
-        if not words:
-            continue
-        runs, cur = [], []
-        for w in words:
-            if cur and (OPENING_PUNCT.search(w.word.strip())
-                        or (pause_split and w.start - cur[-1].end >= pause_split)):
-                runs.append(cur)
-                cur = []
-            cur.append(w)
-            if PUNCT_BREAK.search(w.word.strip()):
-                runs.append(cur)
-                cur = []
-        if cur:
-            runs.append(cur)
-        for run in runs:
-            pieces = [p for chunk in _split_run(run, max_chars)
-                      for part in _split_by_words(chunk, max_words)
-                      for p in _split_by_duration(part, max_seconds)]
-            for piece in pieces:
-                cues.append({
-                    "start": float(piece[0].start),
-                    "end": float(piece[-1].end),
-                    "text": " ".join(w.word.strip() for w in piece),
-                    "words": [
-                        {"word": w.word.strip(), "start": float(w.start), "end": float(w.end)}
-                        for w in piece
-                    ],
-                })
-    if config.EARLY_APPEAR_SECONDS > 0:
-        for cue in cues:
-            cue["start"] = max(0.0, cue["start"] - config.EARLY_APPEAR_SECONDS)
-    for i, cue in enumerate(cues, start=1):
-        cue["index"] = i
-    return cues
+def number_exceptions() -> list[str]:
+    """The editable list of number expressions that stay in words (data folder)."""
+    path = DATA_DIR / NUMBER_EXCEPTIONS_FILE
+    try:
+        return captions.load_exceptions(path.read_text(encoding="utf-8-sig"))
+    except OSError:
+        return list(captions.DEFAULT_EXCEPTIONS)
 
 
 # ---------------------------------------------------------------------------
 # Stage 4: outputs
 
-def sanitize_cues(cues: list[dict]) -> list[dict]:
-    """Clamp negatives, enforce monotonic order, fix overlaps, enforce minimum length."""
-    for cue in cues:
-        cue["start"] = max(0.0, cue["start"])
-        cue["end"] = max(cue["start"], cue["end"])
-    cues.sort(key=lambda c: c["start"])
-    for i, cue in enumerate(cues):
-        nxt = cues[i + 1] if i + 1 < len(cues) else None
-        if nxt and cue["end"] > nxt["start"] - OVERLAP_GAP:
-            cue["end"] = max(cue["start"], nxt["start"] - OVERLAP_GAP)
-        if cue["end"] - cue["start"] < MIN_CUE_SECONDS:
-            wanted = cue["start"] + MIN_CUE_SECONDS
-            limit = nxt["start"] - OVERLAP_GAP if nxt else wanted
-            cue["end"] = max(cue["end"], min(wanted, limit))
-    for i, cue in enumerate(cues, start=1):
-        cue["index"] = i
-    return cues
+def _ms(seconds: float) -> int:
+    return int(round(float(seconds) * 1000))
 
 
 def _fmt_timestamp(seconds: float) -> str:
-    ms = round(seconds * 1000)
+    ms = max(0, _ms(seconds))
     h, rem = divmod(ms, 3_600_000)
     m, rem = divmod(rem, 60_000)
     s, ms = divmod(rem, 1000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+CRLF = "\r\n"
+
+
+def srt_text(cues: list[dict]) -> str:
+    """The SRT exactly as the Review panel shows the cues: numbered 1…n in order, times to the
+    millisecond, one line of text each. CRLF line endings (CapCut and Premiere read it)."""
+    blocks = []
+    for n, c in enumerate(cues, start=1):
+        start, end = _ms(c["start"]), _ms(c["end"])
+        end = max(end, start + 1)
+        text = " ".join(str(c["text"]).split())
+        blocks.append(f"{n}{CRLF}{_fmt_timestamp(start / 1000)} --> {_fmt_timestamp(end / 1000)}{CRLF}{text}")
+    return (CRLF * 2).join(blocks) + CRLF
+
+
 def write_srt(cues: list[dict], path: Path) -> None:
-    blocks = [
-        f"{c['index']}\n{_fmt_timestamp(c['start'])} --> {_fmt_timestamp(c['end'])}\n{c['text']}"
-        for c in cues
-    ]
-    path.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
+    """UTF-8 without a BOM, CRLF line endings, on every OS (bytes, so Windows adds nothing)."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(srt_text(cues).encode("utf-8"))
+    os.replace(tmp, path)
 
 
 def export_stem(vocals_wav: Path, job_dir: Path) -> Path:
@@ -796,7 +727,7 @@ def export_stem(vocals_wav: Path, job_dir: Path) -> Path:
     out = job_dir / "vocals.mp3"
     proc = subprocess.run(
         [FFMPEG, "-y", "-i", str(vocals_wav), "-b:a", "320k", str(out)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0 or not out.exists():
         return vocals_wav  # WAV always exists; fall back rather than fail the job
@@ -813,9 +744,15 @@ def _slugify(name: str) -> str:
 
 def _make_job_dir(audio_path: Path) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    job_dir = JOBS_DIR / f"{stamp}-{_slugify(audio_path.stem)}"
-    job_dir.mkdir(parents=True, exist_ok=False)
-    return job_dir
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    for n in range(1, 1000):
+        job_dir = JOBS_DIR / f"{stamp}-{_slugify(audio_path.stem)}{'' if n == 1 else f'-{n}'}"
+        try:
+            job_dir.mkdir(exist_ok=False)
+            return job_dir
+        except FileExistsError:
+            continue
+    raise PipelineError("Couldn't create a job folder in jobs/.")
 
 
 def _job_logger(job_dir: Path) -> logging.Logger:
@@ -832,18 +769,20 @@ ISOLATE_TITLES = {"song": "Isolate vocals", "drama": "Isolate dialogue", "reels"
 
 
 def flow_steps(mode: str, section: str, isolate: str = "on",
-               polish_with: str | None = None) -> list[tuple[set, str]]:
+               polish_with: str | None = None, check_with: str | None = None) -> list[tuple[set, str]]:
     """The progress steps a flow shows, as (stage keys, title). mode: "lyrics" or "transcribe".
-    polish_with: the AI provider's name when AI polish is on (transcribe mode)."""
+    polish_with: the AI provider's name when AI polish is on (transcribe mode). check_with: the
+    provider's name when the final AI check runs after the captions are built (V4.6)."""
     song = section == "song"
     first = ({"prepare", "separate"},
              ISOLATE_TITLES[section] if isolate == "on" else "Prepare audio")
+    check = [({"check"}, f"Final check with {check_with}")] if check_with else []
     if mode == "transcribe":
         polish = [({"polish"}, f"Polish with {polish_with}")] if polish_with else []
         return [first, ({"transcribe"}, "Transcribe"), *polish,
-                ({"align"}, "Align transcript"), ({"build"}, "Build subtitles")]
+                ({"align"}, "Align transcript"), ({"build"}, "Build subtitles"), *check]
     return [first, ({"align"}, "Align lyrics" if song else "Align transcript"),
-            ({"build"}, "Build subtitles")]
+            ({"build"}, "Build subtitles"), *check]
 
 
 def make_reporter(steps: list[tuple[set, str]], progress_callback):
@@ -1249,14 +1188,19 @@ def approximate_segments(segments: list[tuple], lines: list[str]) -> list:
 
 def align_and_write(ctx: dict, lyrics_text: str, strip_tags: bool = True,
                     video_format: str = None, language: str = None,
-                    report=lambda key, msg: None) -> dict:
+                    report=lambda key, msg: None, caption_mode: str = None, max_words=None,
+                    max_chars=None, merge_short=None, ai: dict | None = None) -> dict:
     """Align the given (or approved) text to the job's audio and write the SRT and cue data.
 
     For songs this reuses the vocals isolated in start_job, so nothing is separated twice.
+    caption_mode: "line" (TikTok rules) or "word"; max_words / max_chars / merge_short: the user's
+    caption settings (None = config defaults). ai: settings for the final AI check
+    (final_check.active()), or None for the offline cleanup only.
     """
     video_format = video_format or config.FORMAT_DEFAULT
     language = language or config.LANGUAGE
     script = ctx.get("script")  # set by run_transcription; None in lyrics mode
+    transcribed = ctx.get("whisper_draft") is not None
     approximate = script == "english"
     # Auto-detect: reuse what transcription detected; without a transcription Whisper detects.
     whisper_language = (ctx["detected_language"] if language == AUTO_LANGUAGE
@@ -1267,21 +1211,25 @@ def align_and_write(ctx: dict, lyrics_text: str, strip_tags: bool = True,
         whisper_language = "hi"  # an approved Devanagari draft with Hinglish still selected
     if approximate:
         whisper_language = None  # nothing is aligned; timings come from Whisper's segments
-    max_chars = (config.MAX_CHARS_VERTICAL if video_format == "vertical"
-                 else config.MAX_CHARS_HORIZONTAL)
-    rules = config.SECTIONS[ctx["section"]]
-    max_seconds = rules["max_cue_seconds"]
+    caption_language = ("hinglish" if "hinglish" in (language, script)
+                        else whisper_language or ctx.get("detected_language"))
+    rules = caption_rules(ctx["section"], video_format, caption_mode, transcribe=transcribed,
+                          max_words=max_words, max_chars=max_chars, merge_short=merge_short,
+                          language=caption_language)
     if approximate:  # translation phrase timings can run long
-        max_seconds = min(max_seconds or math.inf, config.MAX_CUE_SECONDS_TRANSLATION)
-    pause_split, max_words = rules["pause_split_seconds"], rules["max_words"]
+        rules["max_seconds"] = min(rules["max_seconds"] or math.inf, config.MAX_CUE_SECONDS_TRANSLATION)
     lyric_lines, lyric_warning = preprocess_lyrics(lyrics_text, strip_tags=strip_tags)
+    # Speaker labels ("Sarah: ...") start a new caption and are left out of the text (V4.6).
+    lyric_lines, speakers, labels = captions.split_speakers(lyric_lines)
+    if not lyric_lines:
+        raise PipelineError("The script has speaker names but no words to time.")
     log, job_dir, timings = ctx["log"], ctx["job_dir"], ctx["timings"]
     warnings = ctx["warnings"] + ([lyric_warning] if lyric_warning else [])
-    log.info("%s %d lines, section=%s, strip_tags=%s, format=%s (max %d chars/line, max %s s/cue, "
-             "max %s words, pause split %s s), language=%s, script=%s (whisper code %s)",
+    log.info("%s %d lines, section=%s, strip_tags=%s, format=%s, rules=%s, language=%s, script=%s "
+             "(whisper code %s), speakers=%s",
              "Timing (approximate, no alignment)" if approximate else "Aligning",
-             len(lyric_lines), ctx["section"], strip_tags, video_format, max_chars, max_seconds,
-             max_words, pause_split, language, script, whisper_language)
+             len(lyric_lines), ctx["section"], strip_tags, video_format, rules, language, script,
+             whisper_language, labels or "none")
     if lyric_warning:
         log.warning(lyric_warning)
     (job_dir / "lyrics.txt").write_text("\n".join(lyric_lines) + "\n", encoding="utf-8")
@@ -1302,76 +1250,185 @@ def align_and_write(ctx: dict, lyrics_text: str, strip_tags: bool = True,
         timings["align_seconds"] = round(time.perf_counter() - t0, 2)
         log.info("Timed %d segments in %.1fs", len(segments), timings["align_seconds"])
 
-        report("build", "Building the SRT…")
+        report("build", "Building the captions…")
         t0 = time.perf_counter()
-        cues = sanitize_cues(chunk_segments(segments, max_chars, max_seconds, pause_split, max_words))
-        srt_path = job_dir / f"{ctx['stem']}.srt"
-        write_srt(cues, srt_path)
-        # The Review panel (V4.5) edits a copy; a new alignment starts from scratch.
-        original_srt = job_dir / "original.srt"
-        shutil.copyfile(srt_path, original_srt)
-        for stale in ("edited.srt", "edited-cues.json"):
-            (job_dir / stale).unlink(missing_ok=True)
-        ctx.update(align_language=language, whisper_language_used=whisper_language, review_recorded={})
-
-        cues_json = {
-            "source_file": ctx["source_file"],
-            "section": ctx["section"],
-            "content_type": "song" if song else "speech",
-            "isolate": ctx["isolate"],
-            "isolated": isolated,
-            "music_detected": ctx["music_detected"],
-            "video_format": video_format,
-            "max_chars_per_line": max_chars,
-            "max_cue_seconds": max_seconds,
-            "max_words_per_cue": max_words,
-            "pause_split_seconds": pause_split,
-            "early_appear_seconds": config.EARLY_APPEAR_SECONDS,
-            "model_size": config.MODEL_SIZE,
-            "language": language,
-            "script": script,
-            "whisper_language": whisper_language,
-            "transcribe_language": ctx.get("transcribe_language"),
-            "spoken_language": ctx.get("detected_language"),
-            "task": ctx.get("task"),
-            "timing": "approximate" if approximate else "aligned",
-            "corrections_table": ctx.get("corrections_table"),
-            "auto_corrections": len(ctx.get("auto_corrections") or []),
-            "hotwords": ctx.get("hotwords") or None,
-            "topic_words": ctx.get("topic_words") or None,
-            "transcribe_engine": ctx.get("engine"),
-            "quality": ctx.get("quality"),
-            "review_highlights": len(ctx.get("review_marks") or []),
-            "ai_polish": ctx.get("ai_polish"),  # provider, model and runs; never the key
-            "separator_engine": config.SEPARATOR_ENGINE if isolated else None,
-            "separator_model": config.SEPARATOR_MODEL if isolated else None,
-            "duration_seconds": round(ctx["duration"], 2),
-            "timings": timings,
-            "cues": cues,
-        }
-        (job_dir / "cues.json").write_text(
-            json.dumps(cues_json, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-
-        stem_path = export_stem(ctx["vocals_path"], job_dir) if isolated else None
+        words = captions.words_from_segments(segments, lyric_lines, speakers)
+        dropped = []
+        if not transcribed and not approximate:
+            # Only what's spoken: script lines the aligner couldn't find are left out (V4.6).
+            dropped = captions.unmatched_lines(words, config.UNMATCHED_LINE_PROBABILITY)
+            if len(dropped) >= len(lyric_lines):
+                dropped = []  # nothing matched well: better to show it all than nothing
+            if dropped:
+                words = [w for w in words if w["line"] not in dropped]
+                shown = ", ".join(f"“{lyric_lines[i]}”" for i in dropped[:5])
+                more = f" and {len(dropped) - 5} more" if len(dropped) > 5 else ""
+                warning = (f"{len(dropped)} script line(s) weren't found in the audio and were left out "
+                           f"of the SRT: {shown}{more}")
+                warnings.append(warning)
+                log.warning(warning + " (lines %s)", [i + 1 for i in dropped])
+        if not words:
+            raise PipelineError(ALIGN_FAILURE_MESSAGE)
+        numbers_language = "hinglish" if "hinglish" in (language, script) else whisper_language
+        tokens = captions.offline_cleanup(captions.make_tokens(words, numbers_language, number_exceptions()), words)
+        ctx["timeline"] = {"words": words, "tokens": tokens, "lines": lyric_lines, "speakers": speakers,
+                           "dropped_lines": dropped, "numbers_language": numbers_language,
+                           "script_text": None if transcribed else lyrics_text, "ai": {}}
+        ctx.update(align_language=language, whisper_language_used=whisper_language, review_recorded={},
+                   video_format=video_format, ai_recorded=[])
+        layout = build_layout(ctx, rules, ai, report)
         timings["outputs_seconds"] = round(time.perf_counter() - t0, 2)
-        log.info("Outputs written in %.1fs. Timings: %s", timings["outputs_seconds"], timings)
-        return {
-            "srt_path": srt_path,
-            "original_srt_path": original_srt,
-            "max_chars": max_chars,
-            "stem_path": stem_path,
-            "audio_path": ctx["input_audio"],
-            "cues_path": job_dir / "cues.json",
-            "job_dir": job_dir,
-            "cues": cues,
-            "timings": timings,
-            "warnings": warnings,
-        }
+        out = write_outputs(ctx, layout, rules, extra={
+            "language": language, "script": script, "whisper_language": whisper_language,
+            "timing": "approximate" if approximate else "aligned", "speakers": labels or None,
+            "dropped_lines": [{"line": i + 1, "text": lyric_lines[i]} for i in dropped]})
+        stem_path = export_stem(ctx["vocals_path"], job_dir) if isolated else None
+        log.info("Outputs written. Timings: %s", timings)
+        return {**out, "stem_path": stem_path, "audio_path": ctx["input_audio"], "job_dir": job_dir,
+                "timings": timings,
+                "warnings": warnings + ([layout["ai_message"]] if layout["ai_message"] else [])}
     except PipelineError:
         raise
     except Exception:
         raise _unexpected(log, job_dir)
+
+
+def _ai_key(rules: dict) -> str:
+    return f"{rules['mode']}:{rules['max_words']}:{rules['max_chars']}:{rules['merge_short']}"
+
+
+def build_layout(ctx: dict, rules: dict, ai: dict | None, report=lambda key, msg: None) -> dict:
+    """Cues from the job's timeline (ctx["timeline"]) with these rules, after the final AI check
+    when `ai` is set. The check's text fixes are kept for later layouts (switching Line by line /
+    Word by word); its cut points only for the same rules. Returns {"cues", "ai_message",
+    "ai_changes", "ai_provider"}."""
+    import ai_polish
+    import final_check
+
+    tl = ctx["timeline"]
+    words = tl["words"]
+    tokens = tl.get("ai_tokens") or tl["tokens"]
+    chunks = None if rules["mode"] == "word" else captions.line_chunks(tokens, words, rules)
+    message, provider = None, None
+    key = _ai_key(rules)
+    if ai and key not in tl["ai"]:
+        provider = ai_polish.provider_name(ai["provider"])
+        report("check", f"Final check with {provider}…")
+        current = chunks if chunks is not None else [[k] for k in range(len(tokens))]
+        result = final_check.review(tokens, words, current, ai, section=ctx["section"],
+                                    language=language_name(ctx.get("whisper_language_used"))
+                                    if ctx.get("whisper_language_used") else None,
+                                    script=ctx.get("script"), script_text=tl.get("script_text"), rules=rules)
+        message = result["message"]
+        tl["ai"][key] = {"chunks": result["chunks"], "message": message}
+        if result["changes"]:
+            tl["ai_tokens"] = tokens = result["tokens"]
+        _log_ai(ctx, result, rules)
+    if rules["mode"] == "line":
+        saved = tl["ai"].get(key, {}).get("chunks")
+        chunks = saved if saved and captions.check_chunks(tokens, words, saved, rules) \
+            else captions.line_chunks(tokens, words, rules)
+    cues = captions.build_cues(tokens, words, rules, chunks)
+    return {"cues": cues, "ai_message": message, "ai_provider": provider,
+            "ai_changes": sum(len(c.get("ai", [])) for c in cues)}
+
+
+def _log_ai(ctx: dict, result: dict, rules: dict):
+    """Each final check is kept in the job folder (what was sent and returned; never the key)."""
+    path = ctx["job_dir"] / "ai-final-check.json"
+    try:
+        runs = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    except ValueError:
+        runs = []
+    runs.append({"provider": result.get("provider"), "seconds": result.get("seconds"), "mode": rules["mode"],
+                 "changes": result["changes"], "cuts_used": result["chunks"] is not None,
+                 "message": result["message"], "sent": result["sent"], "returned": result["returned"]})
+    path.write_text(json.dumps(runs, indent=1, ensure_ascii=False), encoding="utf-8")
+    ctx["log"].info("Final AI check (%s, %s mode) in %ss: %d text fixes, AI cuts %s%s",
+                    result.get("provider"), rules["mode"], result.get("seconds"), result["changes"],
+                    "used" if result["chunks"] is not None else "not used",
+                    f" — {result['message']}" if result["message"] else "")
+
+
+def write_outputs(ctx: dict, layout: dict, rules: dict, extra: dict | None = None) -> dict:
+    """<name>.srt, original.srt (identical) and cues.json from one list of cues; old Review edits
+    are cleared. The Review panel shows exactly these cues."""
+    job_dir = ctx["job_dir"]
+    cues = layout["cues"]
+    srt_path = job_dir / f"{ctx['stem']}.srt"
+    write_srt(cues, srt_path)
+    original_srt = job_dir / "original.srt"
+    write_srt(cues, original_srt)
+    for stale in ("edited.srt", "edited-cues.json"):
+        (job_dir / stale).unlink(missing_ok=True)
+    tl = ctx["timeline"]
+    timeline = {k: tl[k] for k in ("words", "tokens", "lines", "speakers", "dropped_lines", "numbers_language")}
+    timeline["ai_tokens"] = tl.get("ai_tokens")
+    (job_dir / "timeline.json").write_text(json.dumps(timeline, ensure_ascii=False), encoding="utf-8")
+    isolated = ctx["source_path"] == ctx["vocals_path"]
+    meta = ctx.setdefault("cues_meta", {})
+    meta.update(extra or {})
+    if layout.get("ai_provider"):
+        meta["final_check"] = {"provider": layout["ai_provider"], "changes": layout["ai_changes"],
+                               "message": layout["ai_message"]}
+    cues_json = {
+        "source_file": ctx["source_file"],
+        "section": ctx["section"],
+        "content_type": "song" if ctx["section"] == "song" else "speech",
+        "isolate": ctx["isolate"],
+        "isolated": isolated,
+        "music_detected": ctx["music_detected"],
+        "video_format": ctx.get("video_format"),
+        "caption_mode": rules["mode"],
+        "max_chars_per_line": rules["max_chars"],
+        "max_words_per_cue": rules["max_words"],
+        "max_cue_seconds": rules["max_seconds"],
+        "pause_split_seconds": rules["pause_split"],
+        "merge_short": rules["merge_short"],
+        "model_size": config.MODEL_SIZE,
+        **{k: meta.get(k) for k in ("language", "script", "whisper_language", "timing", "speakers",
+                                    "dropped_lines", "final_check")},
+        "transcribe_language": ctx.get("transcribe_language"),
+        "spoken_language": ctx.get("detected_language"),
+        "task": ctx.get("task"),
+        "corrections_table": ctx.get("corrections_table"),
+        "auto_corrections": len(ctx.get("auto_corrections") or []),
+        "hotwords": ctx.get("hotwords") or None,
+        "topic_words": ctx.get("topic_words") or None,
+        "transcribe_engine": ctx.get("engine"),
+        "quality": ctx.get("quality"),
+        "review_highlights": len(ctx.get("review_marks") or []),
+        "ai_polish": ctx.get("ai_polish"),  # provider, model and runs; never the key
+        "separator_engine": separator_engine() if isolated else None,
+        "separator_model": config.SEPARATOR_MODEL if isolated else None,
+        "duration_seconds": round(ctx["duration"], 2),
+        "timings": ctx["timings"],
+        "cues": cues,
+    }
+    (job_dir / "cues.json").write_text(json.dumps(cues_json, indent=2, ensure_ascii=False), encoding="utf-8")
+    ctx["rules"] = rules
+    return {"srt_path": srt_path, "original_srt_path": original_srt, "cues_path": job_dir / "cues.json",
+            "cues": cues, "max_chars": rules["max_chars"], "caption_mode": rules["mode"],
+            "ai_message": layout["ai_message"], "ai_changes": layout["ai_changes"]}
+
+
+def relayout(ctx: dict, caption_mode: str, ai: dict | None = None, report=lambda key, msg: None,
+             max_words=None, max_chars=None, merge_short=None) -> dict:
+    """Line by line <-> Word by word (or new caption settings) from the same word timings, without
+    aligning or transcribing again. Rewrites the SRT, original.srt and cues.json."""
+    old = ctx["rules"]
+    rules = caption_rules(ctx["section"], ctx.get("video_format") or config.FORMAT_DEFAULT, caption_mode,
+                          transcribe=ctx.get("whisper_draft") is not None,
+                          max_words=old["max_words"] if max_words is None else max_words,
+                          max_chars=old["max_chars"] if max_chars is None else max_chars,
+                          merge_short=old["merge_short"] if merge_short is None else merge_short,
+                          language=old.get("language"))
+    rules["max_seconds"] = old["max_seconds"]
+    layout = build_layout(ctx, rules, ai, report)
+    ctx["review_recorded"] = {}
+    out = write_outputs(ctx, layout, rules)
+    ctx["log"].info("Captions rebuilt as %s (%d cues)", rules["mode"], len(out["cues"]))
+    return out
 
 
 def run_pipeline(audio_path, lyrics_text: str, strip_tags: bool = True,
@@ -1406,6 +1463,11 @@ def _progress(step, total, message, fraction=None):
 
 
 def main(argv: list[str]) -> int:
+    for stream in (sys.stdout, sys.stderr):  # a Windows console may not take Hindi text
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     codes = [code for code, _ in config.LANGUAGES]
     sections = "|".join(SECTIONS)
     usage = ("Usage: python pipeline.py <audio|video> <lyrics.txt> [vertical|horizontal] "

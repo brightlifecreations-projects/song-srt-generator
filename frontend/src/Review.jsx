@@ -1,14 +1,29 @@
 import { useEffect, useRef, useState } from "react";
 
 /* The Review panel (V4.5): check and edit the generated subtitles before downloading.
-   Cues are {start, end, text}. Every change goes through commit(), which keeps undo/redo history,
-   tells the page (so the player draws the edited cue) and autosaves to the job folder
-   (edited.srt; original.srt is kept). */
+   Cues are {start, end, text, ai?}. Every change goes through commit(), which keeps undo/redo
+   history, tells the page (so the player draws the edited cue) and autosaves to the job folder
+   (edited.srt; original.srt is kept).
 
-import { MIN_CUE, autoFix, fmt, problems, r3 } from "./reviewFix.js";
+   V4.6, preview = export: the list shows times to the millisecond, exactly as the SRT has them;
+   cue text is kept single-spaced and never empty, the way the server writes it; and Download first
+   commits a line still being typed and saves any pending edit, so the file always matches the list.
+   The final AI check's changes (cue.ai: [{i: word position, from, to}]) are highlighted with the
+   original word and Undo. The Line by line / Word by word switch rebuilds the cues on the server. */
+
+import { MIN_CUE, autoFix, fmt, fmtMs, problems, r3 } from "./reviewFix.js";
+
+const clean = text => String(text).split(/\s+/).filter(Boolean).join(" ");
+
+/** The AI's changes that are still in the text (the word at that position is the AI's word). */
+const liveAi = c => {
+  const words = c.text.split(" ");
+  return (c.ai || []).filter(a => words[a.i] === a.to);
+};
 
 export default function Review({ jobId, initialCues, edited: initiallyEdited, cap, player, time, duration,
-                                 playing, active, onCues, srtName, hasVocals, vocalsLabel }) {
+                                 playing, active, onCues, srtName, hasVocals, vocalsLabel,
+                                 captionMode, onCaptionMode, switching, checkWith, checkMessage }) {
   const [hist, setHist] = useState({ past: [], present: initialCues, future: [] });
   const [sel, setSel] = useState(0);
   const [editing, setEditing] = useState(false);
@@ -20,14 +35,21 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
   const rowRefs = useRef([]);
   const inputRef = useRef(null);
   const saveTimer = useRef(null);
+  const pending = useRef(null);       // cues waiting to be saved
+  const saving = useRef(Promise.resolve(true));
+  const downloading = useRef(false);
+  const applied = useRef(true);       // the line being typed was already applied (Enter, then blur)
   const cues = hist.present;
   const issues = problems(cues, cap);
   const playingIdx = cues.findIndex(c => time >= c.start && time < c.end);
+  const aiCount = cues.reduce((n, c) => n + liveAi(c).length, 0);
 
   useEffect(() => { onCues(cues); }, [cues]);
 
   function commit(next, keepSel) {
-    const sorted = [...next].sort((a, b) => a.start - b.start);
+    const sorted = next.map(c => ({ ...c, start: r3(c.start), end: r3(c.end), text: clean(c.text) }))
+      .filter(c => c.text)
+      .sort((a, b) => a.start - b.start);
     setHist(h => ({ past: [...h.past.slice(-99), h.present], present: sorted, future: [] }));
     if (keepSel !== undefined) setSel(Math.max(0, Math.min(keepSel, sorted.length - 1)));
   }
@@ -41,17 +63,56 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
 
   function scheduleSave(next) {
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      const res = await fetch(`/api/jobs/${jobId}/cues`, {
-        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cues: next }),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) { setSaveNote(body.error || "Couldn't save the edits."); return; }
-      setEdited(true);
-      setSaveNote(body.recorded?.length
-        ? `Saved · added to your corrections: ${body.recorded.map(r => `${r.wrong} → ${r.correct}`).join(", ")}`
-        : `Saved ${new Date().toLocaleTimeString()}`);
-    }, 700);
+    pending.current = next;
+    saveTimer.current = setTimeout(flushSave, 700);
+  }
+
+  /** Save the pending edits now (Download waits for this). Saves run one after another. */
+  function flushSave() {
+    clearTimeout(saveTimer.current);
+    const next = pending.current;
+    if (!next) return saving.current;
+    pending.current = null;
+    saving.current = saving.current.then(async () => {
+      try {
+        const res = await fetch(`/api/jobs/${jobId}/cues`, {
+          method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cues: next }),
+          keepalive: true,
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) { setSaveNote(body.error || "Couldn't save the edits."); return false; }
+        setEdited(true);
+        setSaveNote(body.recorded?.length
+          ? `Saved · added to your corrections: ${body.recorded.map(r => `${r.wrong} → ${r.correct}`).join(", ")}`
+          : `Saved ${new Date().toLocaleTimeString()}`);
+        return true;
+      } catch {
+        setSaveNote("Couldn't reach the app to save the edits.");
+        return false;
+      }
+    });
+    return saving.current;
+  }
+
+  /** Download SRT: commit a line still being typed, save, then download what the list shows. */
+  async function download(e) {
+    if (downloading.current) { downloading.current = false; return; } // our own click, below
+    e.preventDefault();
+    const link = e.currentTarget;
+    if (inputRef.current) applyInput(sel, inputRef.current.value);
+    await new Promise(r => setTimeout(r, 30)); // let the commit render and schedule its save
+    if (await flushSave() === false) return;
+    downloading.current = true;
+    link.click();
+  }
+
+  function applyInput(i, value) {
+    if (applied.current) return;
+    applied.current = true;
+    const v = clean(value);
+    setEditing(false);
+    if (!v) { setNotice("A subtitle can't be empty — use Delete to remove it."); return; }
+    if (v !== cues[i].text) update(i, { text: v });
   }
 
   const update = (i, patch) => commit(cues.map((c, k) => (k === i ? { ...c, ...patch } : c)), i);
@@ -69,16 +130,23 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
   function split(i) {
     const c = cues[i];
     const pos = editing && inputRef.current ? inputRef.current.selectionStart : Math.floor(c.text.length / 2);
-    const a = c.text.slice(0, pos).trim(), b = c.text.slice(pos).trim();
+    const a = clean(c.text.slice(0, pos)), b = clean(c.text.slice(pos));
     if (!a || !b) return;
     const t = r3(c.start + (c.end - c.start) * pos / c.text.length);
-    commit([...cues.slice(0, i), { ...c, end: t, text: a }, { start: t, end: c.end, text: b }, ...cues.slice(i + 1)], i);
+    const n = a.split(" ").length;
+    const ai = liveAi(c);
+    commit([...cues.slice(0, i),
+      { ...c, end: t, text: a, ai: ai.filter(x => x.i < n) },
+      { start: t, end: c.end, text: b, ai: ai.filter(x => x.i >= n).map(x => ({ ...x, i: x.i - n })) },
+      ...cues.slice(i + 1)], i);
     setEditing(false);
   }
   function merge(i) {
     if (i >= cues.length - 1) return;
     const a = cues[i], b = cues[i + 1];
-    commit([...cues.slice(0, i), { start: a.start, end: b.end, text: `${a.text} ${b.text}` }, ...cues.slice(i + 2)], i);
+    const n = a.text.split(" ").length;
+    commit([...cues.slice(0, i), { start: a.start, end: b.end, text: `${a.text} ${b.text}`,
+      ai: [...liveAi(a), ...liveAi(b).map(x => ({ ...x, i: x.i + n }))] }, ...cues.slice(i + 2)], i);
   }
   function remove(i) {
     commit(cues.filter((_, k) => k !== i), i);
@@ -90,6 +158,13 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
     const list = [...cues, fresh].sort((a, b) => a.start - b.start);
     commit(list, list.indexOf(fresh));
     setEditing(true);
+  }
+  /** Put the word the AI changed back the way it was. */
+  function undoAi(i, change) {
+    const c = cues[i];
+    const words = c.text.split(" ");
+    words[change.i] = change.from;
+    update(i, { text: words.join(" "), ai: (c.ai || []).filter(a => a !== change) });
   }
   async function retime(i) {
     const c = cues[i];
@@ -116,6 +191,16 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
     } finally {
       setRetiming(false);
     }
+  }
+
+  function switchMode(mode) {
+    if (mode === captionMode || switching) return;
+    if ((edited || hist.past.length) && !window.confirm(
+      "Rebuild the subtitles " + (mode === "word" ? "word by word" : "line by line") +
+      " from the same timings? Your edits in this panel are replaced.")) return;
+    clearTimeout(saveTimer.current);
+    pending.current = null;
+    onCaptionMode(mode);
   }
 
   function go(i, play = true) {
@@ -154,7 +239,37 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  useEffect(() => { if (editing) inputRef.current?.focus(); }, [editing, sel]);
+  // Leaving the page, or this panel going away (a new SRT), with an edit not saved yet: save it now.
+  useEffect(() => {
+    window.addEventListener("pagehide", flushSave);
+    return () => { window.removeEventListener("pagehide", flushSave); flushSave(); };
+  }, [jobId]);
+
+  useEffect(() => {
+    if (editing) { applied.current = false; inputRef.current?.focus(); }
+  }, [editing, sel]);
+
+  function cueText(c, i) {
+    const ai = liveAi(c);
+    if (!ai.length) return c.text;
+    const words = c.text.split(" ");
+    return words.map((w, k) => {
+      const change = ai.find(a => a.i === k);
+      const gap = k < words.length - 1 ? " " : "";
+      if (!change) return w + gap;
+      return (
+        <span key={k}>
+          <span className="ai-fix" data-testid="ai-fix" tabIndex={0} title={`AI changed “${change.from}” to “${change.to}”`}>
+            {w}
+            <span className="ai-fix-pop" onClick={e => e.stopPropagation()}>
+              was “{change.from}”
+              <button onClick={() => undoAi(i, change)} data-testid="ai-undo">Undo</button>
+            </span>
+          </span>{gap}
+        </span>
+      );
+    });
+  }
 
   const counts = issues.reduce((n, p) => ({ ...n, [p.kind]: (n[p.kind] || 0) + 1 }), {});
   return (
@@ -170,12 +285,30 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
         <span className="mono">{fmt(time)} / {fmt(duration)}</span>
       </div>
 
+      <div className="review-mode">
+        <div className="segmented small capmode" role="radiogroup" aria-label="Captions" data-testid="review-capmode">
+          {[["line", "Line by line"], ["word", "Word by word"]].map(([code, title]) => (
+            <button key={code} role="radio" aria-checked={captionMode === code} disabled={switching}
+              className={`segment${captionMode === code ? " on" : ""}`} onClick={() => switchMode(code)}>
+              <span><b>{title}</b></span>
+            </button>
+          ))}
+        </div>
+        {switching && <span className="muted">Rebuilding from the same timings…</span>}
+        {!switching && aiCount > 0 && (
+          <span className="ai-count" data-testid="ai-count-review">
+            <b>{aiCount} AI {aiCount === 1 ? "fix" : "fixes"}</b>{checkWith ? ` by ${checkWith}` : ""} · hover one for the original
+          </span>
+        )}
+      </div>
+      {checkMessage && <p className="stage-note muted" data-testid="check-message">{checkMessage}</p>}
+
       <div className="review-tools">
         <button className="loadtxt" onClick={addAtPlayhead} data-testid="add-cue">+ Cue at playhead</button>
         <label className="check loop"><input type="checkbox" checked={loop} onChange={e => setLoop(e.target.checked)} data-testid="loop" /> Loop this cue</label>
         <span className="spacer" />
-        <button className="loadtxt" onClick={undo} disabled={!hist.past.length} data-testid="undo" title="Undo (⌘Z)">Undo</button>
-        <button className="loadtxt" onClick={redo} disabled={!hist.future.length} data-testid="redo" title="Redo (⇧⌘Z)">Redo</button>
+        <button className="loadtxt" onClick={undo} disabled={!hist.past.length} data-testid="undo" title="Undo (Ctrl+Z / ⌘Z)">Undo</button>
+        <button className="loadtxt" onClick={redo} disabled={!hist.future.length} data-testid="redo" title="Redo (Ctrl+Shift+Z / ⇧⌘Z)">Redo</button>
       </div>
 
       {issues.length > 0 && (
@@ -202,17 +335,17 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
                 className={`rcue${i === playingIdx ? " playing" : ""}${on ? " on" : ""}${bad.length ? " bad" : ""}`}
                 onClick={() => { if (!on) { go(i); setEditing(false); } }} data-testid="rcue">
                 <span className="cue-num">{String(i + 1).padStart(2, "0")}</span>
-                <span className="cue-time">{fmt(c.start)}<br />{fmt(c.end)}</span>
+                <span className="cue-time" title="Start and end, exactly as in the SRT">{fmtMs(c.start)}<br />{fmtMs(c.end)}</span>
                 <span className="rcue-text">
                   {on && editing ? (
                     <input ref={inputRef} defaultValue={c.text} aria-label="Cue text"
                       onKeyDown={e => {
-                        if (e.key === "Enter") { e.preventDefault(); if (e.currentTarget.value.trim() !== c.text) update(i, { text: e.currentTarget.value.trim() }); setEditing(false); }
+                        if (e.key === "Enter") { e.preventDefault(); applyInput(i, e.currentTarget.value); }
                         if (e.key === "Escape") setEditing(false);
                       }}
-                      onBlur={e => { const v = e.currentTarget.value.trim(); if (v && v !== c.text) update(i, { text: v }); setEditing(false); }} />
+                      onBlur={e => applyInput(i, e.currentTarget.value)} />
                   ) : (
-                    <span onDoubleClick={() => { setSel(i); setEditing(true); }}>{c.text}</span>
+                    <span onDoubleClick={() => { setSel(i); setEditing(true); }}>{cueText(c, i)}</span>
                   )}
                   {bad.length > 0 && <small className="rcue-bad">{bad.map(p => p.text).join(" · ")}</small>}
                 </span>
@@ -244,10 +377,10 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
       </div>
 
       <div className="download-row">
-        <a className="dl-primary" href={`/api/jobs/${jobId}/srt`} data-testid="dl-srt">
+        <a className="dl-primary" href={`/api/jobs/${jobId}/srt`} onClick={download} data-testid="dl-srt">
           <span>
             <b>Download SRT {edited && <span className="edited-badge" data-testid="edited-badge">Edited</span>}</b>
-            <span>{srtName} · {cues.length} cues</span>
+            <span>{srtName} · {cues.length} cues · {captionMode === "word" ? "word by word" : "line by line"}</span>
           </span>
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"><path d="M8 2v9M4.5 7.5 8 11l3.5-3.5" /><path d="M2.5 13.5h11" /></svg>
         </a>

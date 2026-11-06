@@ -194,6 +194,28 @@ export default function AiKeys({ active, onChange }) {
         </div>
       </section>
 
+      <section className="card" data-testid="final-check">
+        <div className="card-row">
+          <div>
+            <h2 className="card-title">Final AI check before output</h2>
+            <p className="card-hint">Every SRT, on every page and in both caption modes: once the subtitles are
+              built, the provider below checks them — stray quotes and apostrophes, capitals, punctuation,
+              numbers as digits, misspellings, and line cuts that break the caption rules. It can only fix a
+              word's spelling or move a cut between words, never add or remove a spoken word, so the timing
+              can't drift. Its changes are highlighted in the Review panel, with the original and <i>Undo</i>.</p>
+            <p className="muted ai-status" data-testid="final-check-status">{state.usable
+              ? (state.final_check !== false ? `Runs with ${activeProvider?.name || "the active provider"} after every SRT.`
+                                             : "Off: only the offline cleanup runs (stray quotes, sentence case, numbers).")
+              : "No provider set up yet, so the offline cleanup runs instead (stray quotes, sentence case, numbers)."}</p>
+          </div>
+          <label className="switch">
+            <input type="checkbox" checked={state.final_check !== false}
+              onChange={e => save({ final_check: e.target.checked })} aria-label="Final AI check on" />
+            <span className="switch-track" /> {state.final_check !== false ? "On" : "Off"}
+          </label>
+        </div>
+      </section>
+
       <section className="card">
         <h2 className="card-title">Provider</h2>
         <div className="ai-row">
