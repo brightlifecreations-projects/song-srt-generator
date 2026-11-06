@@ -46,9 +46,9 @@ class SourceTests(unittest.TestCase):
     def test_undone_ai_fix_is_not_recorded(self):
         rows = self.approve("kal ke board exam", [{"from": "exam", "to": "exams"}], "kal ke board exam")
         self.assertNotIn("exam", rows)
-        rejected = json.loads((self.job / "ai-rejected.json").read_text())
+        rejected = json.loads((self.job / "ai-rejected.json").read_text(encoding="utf-8"))
         self.assertEqual(rejected, [{"from": "exam", "to": "exams"}])
-        self.assertIn("AI fixes you rejected", (self.job / "corrections-diff.md").read_text())
+        self.assertIn("AI fixes you rejected", (self.job / "corrections-diff.md").read_text(encoding="utf-8"))
 
     def test_edited_ai_fix_is_recorded_as_ai_plus_user(self):
         rows = self.approve("padhai karni hai", [{"from": "padhai", "to": "padai"}], "padhaai karni hai")
@@ -85,7 +85,7 @@ class SourceTests(unittest.TestCase):
         again = corrections.load(self.data)["Hinglish"]  # saved in the new format, read back
         self.assertEqual({k: (r["source"], r["disabled"]) for k, r in again.items()},
                          {"bord": ("AI", False), "adti": ("User", False), "main": ("User", True)})
-        self.assertIn("| Source |", corrections.path(self.data).read_text())
+        self.assertIn("| Source |", corrections.path(self.data).read_text(encoding="utf-8"))
 
     def test_bad_source_is_reported(self):
         bad = ("## Hinglish\n| Wrong | Correct | Times seen | Last seen | Source | Notes |\n"

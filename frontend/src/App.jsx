@@ -14,9 +14,9 @@ const SECTION_TABS = [
 
 /* Each page's title and one short line (V4.4: replaces the masthead). */
 const PAGES = {
-  song: { title: "Song", line: "Lyrics timed to the vocals — one subtitle per phrase." },
+  song: { title: "Song", line: "Lyrics timed to the vocals — short captions, cut where the line breathes." },
   drama: { title: "Drama", line: "Dialogue subtitles — 7 seconds at most, a new one at every pause." },
-  reels: { title: "Reels / YouTube", line: "Short, punchy captions — four words or less, 2.5 seconds at most." },
+  reels: { title: "Reels / YouTube", line: "Short, punchy captions — five words at most, 2.5 seconds at most." },
   corrections: { title: "Corrections", line: "Whisper's mistakes and your fixes, learnt from every approval." },
   ai: { title: "AI & API keys", line: "Optional AI polish. Only transcript text is sent; audio and video stay on this computer." },
   updates: { title: "Updates", line: "Check for a new version, and choose how updates arrive." },

@@ -1,12 +1,21 @@
 /* Review panel checks and automatic fixes (V4.5), kept apart so they can be tested on their own. */
 
-export const MIN_CUE = 0.3;
+/* V4.6: short captions are allowed (word by word especially); only a cue too short to see is flagged. */
+export const MIN_CUE = 0.08;  // = captions.MIN_VISIBLE: what the generator itself guarantees
 export const fmt = t => {
   if (!isFinite(t)) return "0:00.0";
   const m = Math.floor(t / 60);
   return `${m}:${(t % 60).toFixed(1).padStart(4, "0")}`;
 };
+/** m:ss.mmm — to the millisecond, as the SRT has it (the list used to round to 0.1 s). */
+export const fmtMs = t => {
+  const ms = Math.max(0, Math.round((isFinite(t) ? t : 0) * 1000));
+  const m = Math.floor(ms / 60000), s = Math.floor(ms / 1000) % 60;
+  return `${m}:${String(s).padStart(2, "0")}.${String(ms % 1000).padStart(3, "0")}`;
+};
 export const r3 = t => Math.round(t * 1000) / 1000;
+/** Characters on screen: combining marks (Devanagari vowel signs…) and joiners don't count. */
+export const displayLen = text => text.replace(/[\p{M}\u200c\u200d]/gu, "").length;
 /** Shorter than MIN_CUE — to the millisecond, so a cue Fix automatically made 0.3 s long doesn't
     read as 0.29999… (floating point) and stay flagged. */
 const tooShort = c => c.end - c.start < MIN_CUE - 0.0005;
@@ -18,7 +27,7 @@ export function problems(cues, cap) {
     const next = cues[i + 1];
     if (next && c.end > next.start + 0.001) out.push({ i, kind: "overlap", text: `overlaps cue ${i + 2}` });
     if (tooShort(c)) out.push({ i, kind: "short", text: `shorter than ${MIN_CUE} s` });
-    if (cap && c.text.length > cap) out.push({ i, kind: "long", text: `${c.text.length} characters (max ${cap})` });
+    if (cap && displayLen(c.text) > cap) out.push({ i, kind: "long", text: `${displayLen(c.text)} characters (max ${cap})` });
   });
   return out;
 }
@@ -35,18 +44,18 @@ export function autoFix(cues, cap) {
   });
   const out = [];
   for (const c of sorted) {
-    if (!cap || c.text.length <= cap) { out.push(c); continue; }
+    if (!cap || displayLen(c.text) <= cap) { out.push(c); continue; }
     const pieces = [];
     let cur = "";
     for (const w of c.text.split(" ")) {
-      if (cur && (cur + " " + w).length > cap) { pieces.push(cur); cur = w; } else cur = cur ? cur + " " + w : w;
+      if (cur && displayLen(cur + " " + w) > cap) { pieces.push(cur); cur = w; } else cur = cur ? cur + " " + w : w;
     }
     if (cur) pieces.push(cur);
     const total = pieces.reduce((n, p) => n + p.length, 0) || 1;
     let t = c.start;
     pieces.forEach((p, k) => {
       const end = k === pieces.length - 1 ? c.end : r3(t + (c.end - c.start) * p.length / total);
-      out.push({ start: r3(t), end, text: p });
+      out.push({ start: r3(t), end, text: p });  // (a split line drops its AI highlights)
       t = r3(end + (k === pieces.length - 1 ? 0 : 0.01));
     });
   }

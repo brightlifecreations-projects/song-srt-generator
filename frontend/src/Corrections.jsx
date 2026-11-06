@@ -98,6 +98,58 @@ function HouseSpellings({ active }) {
   );
 }
 
+/** Numbers kept in words (number-exceptions.txt, V4.6): every other number in a subtitle is written
+    as digits ("twelve years" → "12 years"); these expressions stay as they are. */
+function NumberExceptions({ active }) {
+  const [state, setState] = useState(null); // {phrases, edited, path, defaults}
+  const [text, setText] = useState("");
+  const [saved, setSaved] = useState("");
+
+  useEffect(() => {
+    if (!active) return;
+    fetch("/api/number-exceptions").then(r => r.json()).then(b => { setState(b); setText(b.phrases.join("\n")); })
+      .catch(() => {});
+  }, [active]);
+
+  async function put(body) {
+    const res = await fetch("/api/number-exceptions", {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const b = await res.json();
+    setState(b);
+    setText(b.phrases.join("\n"));
+    setSaved(`Saved ${new Date().toLocaleTimeString()}`);
+  }
+  const save = () => put({ phrases: text.split("\n") });
+  const restore = () => {
+    if (window.confirm("Go back to the built-in list of number expressions? Your edits are removed.")) put({ reset: true });
+  };
+
+  if (!state) return null;
+  const dirty = text.split("\n").map(s => s.trim()).filter(Boolean).join("\n") !== state.phrases.join("\n");
+  return (
+    <section className="corr-table numbers" data-testid="number-exceptions">
+      <div className="corr-head">
+        <div>
+          <h3>Numbers kept in words <span className="muted">· {state.edited ? "edited" : "built in"}</span></h3>
+          <p className="section-hint">
+            Every subtitle writes numbers as digits — “12 years”, “Week 1”, “7 a.m.”, “70%”, “size 4”, and
+            Hinglish counts like “do saal” → “2 saal”. Expressions listed here stay in words (“not one inch”,
+            “one time”, “you two”). One per line; a number inside one of them is left alone.
+          </p>
+        </div>
+        <div className="corr-actions">
+          <button className="loadtxt" onClick={restore} disabled={!state.edited}>Restore defaults</button>
+          <button className="loadtxt" onClick={save} disabled={!dirty} data-testid="numbers-save">Save</button>
+        </div>
+      </div>
+      <textarea className="numbers-list" value={text} onChange={e => setText(e.target.value)} rows={8}
+        spellCheck={false} aria-label="Number expressions kept in words" />
+      {saved && <p className="muted section-hint">{saved}{state.edited && <> · <code>{state.path}</code></>}</p>}
+    </section>
+  );
+}
+
 /** The Corrections tab: everything in corrections.md (Whisper's mistakes and their fixes, one
     table per script). Search, edit, disable, delete, add by hand; upload teammates' files and
     merge them (choosing between conflicting fixes); download the merged file; reset with a backup. */
@@ -347,6 +399,7 @@ export default function Corrections({ active }) {
       ))}
 
       <HouseSpellings active={active} />
+      <NumberExceptions active={active} />
     </div>
   );
 }

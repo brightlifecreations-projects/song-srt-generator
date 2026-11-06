@@ -28,13 +28,16 @@ from fastapi.staticfiles import StaticFiles
 
 import ai_polish
 import config
+import final_check
 import review
 import corrections
 import hinglish_model
 from pipeline import (ACCEPTED_EXTENSIONS, AUTO_LANGUAGE, DATA_DIR, DEFAULT_SCRIPT, QUALITIES,
                       SCRIPT_CODES, PipelineError, align_and_write, clean_isolate, clean_section,
-                      flow_steps, is_video, make_reporter, preprocess_lyrics, record_approval,
-                      run_polish, run_transcription, start_job)
+                      NUMBER_EXCEPTIONS_FILE, flow_steps, is_video, make_reporter, number_exceptions,
+                      preprocess_lyrics, record_approval, relayout, run_polish, run_transcription,
+                      start_job)
+import captions
 
 ROOT = Path(__file__).parent
 DIST = ROOT / "frontend" / "dist"
@@ -73,6 +76,10 @@ def _evict_finished_jobs():
     for job_id, job in list(JOBS.items()):
         if job.get("finished", float("inf")) < cutoff:
             JOBS.pop(job_id, None)
+            log = (job.get("ctx") or {}).get("log")
+            for handler in list(log.handlers) if log else []:
+                handler.close()  # Windows: an open log.txt would lock the job folder
+                log.removeHandler(handler)
 
 
 def _run_job(job: dict):
@@ -81,7 +88,11 @@ def _run_job(job: dict):
     def progress(step, total, message, fraction=None):
         job.update(stage=step, message=message, progress=fraction)
 
-    steps = flow_steps(job["mode"], job["section"], job["isolate"], job.get("polish_with"))
+    steps = flow_steps(job["mode"], job["section"], job["isolate"], job.get("polish_with"),
+                       job.get("check_with"))
+    if job["task"] == "relayout":
+        steps = [({"build"}, "Build subtitles")] + ([({"check"}, f"Final check with {job['check_with']}")]
+                                                    if job.get("check_with") else [])
     report = make_reporter(steps, progress)
     if job["task"] == "lyrics":
         preprocess_lyrics(job["lyrics_text"], strip_tags=job["strip_tags"])  # fail fast
@@ -105,6 +116,15 @@ def _run_job(job: dict):
             job["retime_result"] = {"error": str(e)}
         job.update(status="done", message="Done")
         return
+    if job["task"] == "relayout":  # Line by line / Word by word, from the same timings
+        report("build", "Rebuilding the captions from the word timings…")
+        result = relayout(ctx, job["caption_mode"], job.get("check"), report)
+        warnings = [w for w in job.get("warnings", []) if not w.startswith("Final AI check")]
+        job.update(status="done", message="Done", cues=result["cues"], caption_mode=result["caption_mode"],
+                   max_chars=result["max_chars"], edited_srt_path=None, edited_cues=None,
+                   check_message=result["ai_message"], ai_check_changes=result["ai_changes"],
+                   warnings=warnings + ([result["ai_message"]] if result["ai_message"] else []))
+        return
     if job["task"] == "polish":  # "Polish again": the text in the draft box, as it is now
         polished = run_polish(ctx, job["polish_text"], job["ai"], report)
         job.update(status="draft", message="Draft ready", draft_text=polished["draft_text"],
@@ -113,7 +133,9 @@ def _run_job(job: dict):
         return
     result = align_and_write(ctx, job["lyrics_text"], strip_tags=job["strip_tags"],
                              video_format=job["video_format"], language=job["language"],
-                             report=report)
+                             report=report, caption_mode=job.get("caption_mode"),
+                             max_words=job.get("max_words"), max_chars=job.get("max_chars_choice"),
+                             merge_short=job.get("merge_short"), ai=job.get("check"))
     job.update(
         status="done", message="Done",
         srt_path=str(result["srt_path"]),
@@ -122,6 +144,8 @@ def _run_job(job: dict):
         cues=result["cues"], timings=result["timings"], warnings=result["warnings"],
         original_srt_path=str(result["original_srt_path"]), edited_srt_path=None, edited_cues=None,
         video_format=job.get("video_format"), max_chars=result["max_chars"],
+        caption_mode=result["caption_mode"], check_message=result["ai_message"],
+        ai_check_changes=result["ai_changes"],
     )
     if job["task"] == "align":  # an approved transcript: learn its fixes
         job["corrections_recorded"] = record_approval(ctx, job["lyrics_text"])
@@ -193,6 +217,10 @@ def meta():
         "max_upload_mb": {"audio": config.MAX_UPLOAD_MB, "video": config.MAX_VIDEO_UPLOAD_MB},
         "max_chars": {"vertical": config.MAX_CHARS_VERTICAL,
                       "horizontal": config.MAX_CHARS_HORIZONTAL},
+        "max_words": config.MAX_WORDS_PER_CAPTION,
+        "caption_mode_default": config.CAPTION_MODE_DEFAULT,
+        "merge_short_default": config.MERGE_SHORT_DEFAULT,
+        "merge_short_seconds": config.MERGE_SHORT_SECONDS,
         "max_minutes_hard": config.MAX_MINUTES_HARD,
         "strip_tags_default": config.STRIP_TAGS_DEFAULT,
         "version": VERSION,
@@ -319,8 +347,18 @@ def _clean_choices(video_format: str, language: str, section: str, default_langu
     return video_format, language, section
 
 
+def _caption_choices(job: dict, caption_mode: str, max_words: str, max_chars: str, merge_short: str):
+    """The caption settings sent with a job (V4.6), and the final AI check if it's set up."""
+    job.update(caption_mode=caption_mode if caption_mode in ("line", "word") else config.CAPTION_MODE_DEFAULT,
+               max_words=max_words or None, max_chars_choice=max_chars or None,
+               merge_short={"true": True, "false": False}.get(str(merge_short).lower()))
+    check = final_check.active()
+    job.update(check=check, check_with=ai_polish.provider_name(check["provider"]) if check else None)
+
+
 def _queue(job_id: str, job: dict):
-    steps = flow_steps(job["mode"], job["section"], job["isolate"], job.get("polish_with"))
+    steps = flow_steps(job["mode"], job["section"], job["isolate"], job.get("polish_with"),
+                       job.get("check_with"))
     job.update(status="queued", message="Waiting for a free slot…",
                steps=[title for _, title in steps])
     job.setdefault("stage", 0)
@@ -339,6 +377,10 @@ async def create_job(
     section: str = Form("song"),
     isolate: str = Form(""),
     video_preview: bool = Form(False),
+    caption_mode: str = Form(""),
+    max_words: str = Form(""),
+    max_chars: str = Form(""),
+    merge_short: str = Form(""),
 ):
     """Lyrics/script mode: the whole flow in one job."""
     video_format, language, section = _clean_choices(
@@ -348,13 +390,15 @@ async def create_job(
     if isinstance(saved, JSONResponse):
         return saved
     job_id, upload_dir, audio_path = saved
-    return _queue(job_id, {
+    job = {
         "task": "lyrics", "mode": "lyrics", "created": time.time(),
         "audio_path": str(audio_path), "upload_dir": str(upload_dir), "lyrics_text": lyrics,
         "strip_tags": strip_tags, "video_format": video_format, "language": language,
         "section": section, "isolate": clean_isolate(isolate, section),
         "video_preview": video_preview,
-    })
+    }
+    _caption_choices(job, caption_mode, max_words, max_chars, merge_short)
+    return _queue(job_id, job)
 
 
 @app.post("/api/transcribe")
@@ -402,6 +446,10 @@ def approve_transcript(
     strip_tags: bool = Form(False),
     video_format: str = Form(""),
     language: str = Form(AUTO_LANGUAGE),
+    caption_mode: str = Form(""),
+    max_words: str = Form(""),
+    max_chars: str = Form(""),
+    merge_short: str = Form(""),
 ):
     """Transcribe mode, phase 2: align the approved text to the audio prepared in phase 1."""
     job = JOBS.get(job_id)
@@ -414,7 +462,28 @@ def approve_transcript(
     job.pop("finished", None)
     job.update(task="align", stage=job.get("stage", 2), lyrics_text=lyrics,
                strip_tags=strip_tags, video_format=video_format, language=language)
+    _caption_choices(job, caption_mode, max_words, max_chars, merge_short)
     return _queue(job_id, job)
+
+
+@app.post("/api/jobs/{job_id}/captions")
+async def switch_captions(job_id: str, request: Request):
+    """Line by line / Word by word for a finished job: rebuilt from the same word timings (no new
+    alignment or transcription), then the final AI check if it's set up. Replaces Review edits."""
+    job = JOBS.get(job_id)
+    if not job or job.get("status") != "done" or "timeline" not in job.get("ctx", {}):
+        return JSONResponse({"error": "This job has expired. Generate the SRT again."}, status_code=409)
+    mode = (await request.json()).get("mode")
+    if mode not in ("line", "word"):
+        return JSONResponse({"error": "Unknown caption mode."}, status_code=400)
+    job.pop("finished", None)
+    check = final_check.active()
+    check_with = ai_polish.provider_name(check["provider"]) if check else None
+    job.update(task="relayout", caption_mode=mode, check=check, check_with=check_with, stage=0,
+               status="queued", message="Rebuilding the captions…",
+               steps=["Build subtitles"] + ([f"Final check with {check_with}"] if check else []))
+    _work_queue.put(job_id)
+    return {"job_id": job_id}
 
 
 @app.post("/api/jobs/{job_id}/polish")
@@ -442,7 +511,8 @@ PUBLIC_KEYS = ("status", "stage", "steps", "message", "progress", "mode", "secti
                "script_note", "auto_corrections", "corrections_table", "hotwords",
                "corrections_recorded", "review_marks", "engine", "quality", "topic_words",
                "offline_draft", "ai_marks", "ai_message", "ai_provider", "polish_run",
-               "edited_cues", "video_format", "max_chars", "retime_result")
+               "edited_cues", "video_format", "max_chars", "retime_result", "caption_mode",
+               "check_message", "ai_check_changes", "check_with")
 
 
 @app.get("/api/jobs/{job_id}")
@@ -473,7 +543,13 @@ def download_srt(job_id: str, original: bool = False):
     name = job.get("srt_name", "subtitles.srt")
     if original:
         return _job_file(job_id, "original_srt_path", "application/x-subrip",
-                         name.replace(".srt", "-original.srt"))
+                         name[:-4] + "-original.srt" if name.endswith(".srt") else name + "-original.srt")
+    # The final check's text fixes still in the subtitles count as accepted: learnt once, Source AI.
+    if job.get("status") == "done" and "ctx" in job:
+        try:
+            review.record_ai_fixes(job["ctx"], job.get("edited_cues") or job.get("cues") or [])
+        except Exception:  # noqa: BLE001 - never block a download over learning
+            pass
     if job.get("edited_srt_path"):
         return _job_file(job_id, "edited_srt_path", "application/x-subrip", name)
     return _job_file(job_id, "srt_path", "application/x-subrip", name)
@@ -711,6 +787,7 @@ async def ai_put(request: Request):
     models = {**current["models"], **{k: v for k, v in (body.get("models") or {}).items() if v}}
     settings = {"enabled": bool(body.get("enabled", current["enabled"])),
                 "auto": bool(body.get("auto", current["auto"])),
+                "final_check": bool(body.get("final_check", current["final_check"])),
                 "provider": body.get("provider") if body.get("provider") in ai_polish.PROVIDERS
                 else current["provider"],
                 "models": models, "custom_base_url": body.get("custom_base_url", current["custom_base_url"]),
@@ -770,6 +847,31 @@ async def ai_test(request: Request):
     return {"ok": True, "message": f"Connected to {ai_polish.provider_name(settings['provider'])} "
                                    f"({settings['models'][settings['provider']]}) in {result['seconds']:.1f} s. "
                                    f"Test reply: “{result['reply']}”"}
+
+
+# ---------------------------------------------------------------------------
+# Numbers kept in words (number-exceptions.txt in the data folder, V4.6)
+
+@app.get("/api/number-exceptions")
+def number_exceptions_get():
+    path = DATA_DIR / NUMBER_EXCEPTIONS_FILE
+    return {"phrases": number_exceptions(), "edited": path.exists(), "path": str(path),
+            "defaults": captions.DEFAULT_EXCEPTIONS}
+
+
+@app.put("/api/number-exceptions")
+async def number_exceptions_put(request: Request):
+    body = await request.json()
+    path = DATA_DIR / NUMBER_EXCEPTIONS_FILE
+    if body.get("reset"):
+        path.unlink(missing_ok=True)
+    else:
+        phrases = [" ".join(str(x).split()) for x in body.get("phrases", []) if str(x).strip()][:500]
+        text = ("# Number expressions that stay in words (one per line). Everything else is written\n"
+                "# as digits: 'twelve years' becomes '12 years'. Edited in the app's Corrections page.\n"
+                + "\n".join(phrases) + "\n")
+        path.write_bytes(text.encode("utf-8"))
+    return number_exceptions_get()
 
 
 # ---------------------------------------------------------------------------

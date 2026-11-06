@@ -14,16 +14,25 @@ import pipeline
 
 
 def clean_cues(raw: list) -> list[dict]:
-    """The panel's cues → sorted [{"start", "end", "text"}]; raises ValueError on nonsense."""
+    """The panel's cues -> [{"start", "end", "text", "ai"?}] in the panel's own order; raises
+    ValueError on nonsense. The panel already keeps cues sorted, rounded to the millisecond and
+    single-spaced (Review.jsx), so this changes nothing it shows: an empty cue is refused rather
+    than silently dropped, and the order is kept (V4.6, preview = export)."""
     cues = []
     for c in raw:
         start, end, text = float(c["start"]), float(c["end"]), " ".join(str(c["text"]).split())
         if not text:
-            continue
-        if start < 0 or end < start or end > 24 * 3600:
+            raise ValueError("empty cue")
+        if not (0 <= start <= end <= 24 * 3600):
             raise ValueError("bad times")
-        cues.append({"start": round(start, 3), "end": round(end, 3), "text": text})
-    cues.sort(key=lambda c: c["start"])
+        cue = {"start": round(start, 3), "end": round(end, 3), "text": text}
+        ai = [{"i": int(a["i"]), "from": str(a["from"]), "to": str(a["to"])}
+              for a in (c.get("ai") or []) if isinstance(a, dict)]
+        if ai:
+            cue["ai"] = ai
+        cues.append(cue)
+    if any(b["start"] < a["start"] for a, b in zip(cues, cues[1:])):
+        raise ValueError("cues out of order")
     for i, c in enumerate(cues, start=1):
         c["index"] = i
     return cues
@@ -60,6 +69,36 @@ def save_edits(ctx: dict, cues: list[dict], generated: list[dict]) -> dict:
     return {"path": path, "recorded": recorded, "recorded_total": ctx["review_recorded"]}
 
 
+def record_ai_fixes(ctx: dict, cues: list[dict]) -> list[dict]:
+    """The final AI check's text fixes that are still in the subtitles when they're downloaded are
+    accepted: they go into corrections.md with Source = AI, once each (V4.6). Undone ones (the
+    word isn't there any more) and case-, punctuation- or number-only changes aren't learnt."""
+    done = ctx.setdefault("ai_recorded", [])
+    pairs = []
+    for c in cues:
+        words = c["text"].split()
+        for a in c.get("ai") or []:
+            if a["i"] < len(words) and words[a["i"]] == a["to"]:
+                wrong, right = a["from"], a["to"]
+                if corrections.key_of(wrong) == corrections.key_of(right) or not corrections.key_of(wrong):
+                    continue
+                if any(ch.isdigit() for ch in right):
+                    continue
+                if [wrong, right] not in done:
+                    pairs.append((wrong, right, "AI"))
+                    done.append([wrong, right])
+    if not pairs:
+        return []
+    try:
+        recorded = corrections.record(pipeline.DATA_DIR, _table(ctx), pairs)
+    except corrections.CorrectionsError as e:
+        ctx["log"].warning("corrections.md has errors, AI fixes not added: %s", e)
+        return []
+    ctx["log"].info("Final check fixes accepted (Source AI): %s",
+                    ", ".join(f"{r['wrong']} -> {r['correct']}" for r in recorded) or "none")
+    return recorded
+
+
 def retime(ctx: dict, start: float, end: float, text: str, low: float | None = None,
            high: float | None = None) -> dict:
     """Align one cue's (changed) text to its own stretch of audio: start–end widened by 0.75 s,
@@ -70,9 +109,11 @@ def retime(ctx: dict, start: float, end: float, text: str, low: float | None = N
     if t1 - t0 < 0.2 or not str(text).strip():
         raise pipeline.PipelineError("This cue is too short to re-time.")
     clip = ctx["job_dir"] / "retime.wav"
-    subprocess.run([pipeline.FFMPEG, "-y", "-v", "error", "-ss", f"{t0:.3f}", "-t", f"{t1 - t0:.3f}",
-                    "-i", str(ctx["source_path"]), "-ac", "1", "-ar", "16000", str(clip)],
-                   capture_output=True, check=True)
+    proc = subprocess.run([pipeline.FFMPEG, "-y", "-v", "error", "-ss", f"{t0:.3f}", "-t", f"{t1 - t0:.3f}",
+                           "-i", str(ctx["source_path"]), "-ac", "1", "-ar", "16000", str(clip)],
+                          capture_output=True)
+    if proc.returncode != 0 or not clip.exists():
+        raise pipeline.PipelineError("Couldn't cut this cue's audio to re-time it.")
     try:
         result = pipeline.align_lyrics(clip, [" ".join(str(text).split())], ctx["log"],
                                        ctx.get("whisper_language_used"))

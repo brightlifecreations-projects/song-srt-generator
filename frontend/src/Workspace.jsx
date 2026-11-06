@@ -181,7 +181,7 @@ function ProcessingCard({ steps, stage, elapsed, message, progress }) {
   }, []);
 
   const title = steps[Math.max(0, Math.min(stage, steps.length - 1))];
-  const label = LIVE_LABELS[title] || title;
+  const label = LIVE_LABELS[title] || (title?.startsWith("Final check") ? "Final AI check" : title);
 
   return (
     <div className="proc">
@@ -231,8 +231,8 @@ function ProcessingCard({ steps, stage, elapsed, message, progress }) {
 
 const LYRICS_PLACEHOLDER = {
   song: "Paste the lyrics exactly as sung.\nWrite out every repeated chorus in full.\nOne line here becomes one subtitle —\nand a comma or full stop always starts a new one.",
-  drama: "Paste the dialogue exactly as spoken,\none line per speaker turn.\nA pause or a full stop starts a new subtitle,\nand none stays on screen longer than 7 seconds.",
-  reels: "Paste the script exactly as spoken.\nIt's cut into short, punchy captions —\nfour words or less, a new one at every pause.",
+  drama: "Paste the dialogue exactly as spoken, one line per speaker turn.\nSpeaker names like \"Sarah:\" start a new subtitle and are left out of it.\nA full stop or a comma always ends a subtitle.\nLines that aren't in the audio are left out (and listed).",
+  reels: "Paste the script exactly as spoken.\nIt's cut into short captions of up to five words, at natural reading points.\nSpeaker names like \"Sarah:\" start a new caption and are left out of it.\nLines that aren't in the audio are left out (and listed).",
 };
 const DRAFT_PLACEHOLDER =
   "Click Transcribe. Whisper's draft appears here,\none line per phrase, for you to correct\nbefore the subtitles are timed.";
@@ -250,10 +250,12 @@ const ISOLATE_AUTO = ["Auto", "Only if music is detected"];
 const ISOLATE_OFF = ["Off", "Use the audio as is"];
 
 const SECTION_COPY = {
-  song: { text: "lyrics", sung: "sung", rules: "One subtitle per lyric phrase." },
-  drama: { text: "dialogue", sung: "spoken", rules: "Subtitles stay on screen 7 seconds at most, with a new one at every pause." },
-  reels: { text: "script", sung: "spoken", rules: "Short, punchy captions: four words or less, 2.5 seconds at most, a new one at every pause." },
+  song: { text: "lyrics", sung: "sung", rules: "Never across two lyric lines." },
+  drama: { text: "dialogue", sung: "spoken", rules: "7 seconds at most on screen, and a new subtitle at every pause." },
+  reels: { text: "script", sung: "spoken", rules: "2.5 seconds at most on screen, and a new caption at every pause." },
 };
+const CAPTION_RULES = "One line each, up to the word and character limits below, cut at natural reading points " +
+  "(phrases kept whole, never ending on “the”, “and”, “ka”…). Numbers as digits.";
 
 function fmtCue(t) {
   const m = Math.floor(t / 60).toString().padStart(2, "0");
@@ -351,6 +353,13 @@ export default function Workspace({ section, preset, meta, active }) {
   const [transcribeLanguage, setTranscribeLanguage] = useTabSetting(section, "language-transcribe", "");
   const [scriptPick, setScriptPick] = useTabSetting(section, "script", AUTO_SCRIPT);
   const [quality, setQuality] = useTabSetting(section, "quality", "");
+  // V4.6 captions: Line by line (TikTok rules) or Word by word, and the caption limits, per section.
+  const [captionMode, setCaptionMode] = useTabSetting(section, "captions", "line");
+  const [maxWordsPick, setMaxWords] = useTabSetting(section, "max-words", "");
+  const [maxCharsV, setMaxCharsV] = useTabSetting(section, "max-chars-vertical", "");
+  const [maxCharsH, setMaxCharsH] = useTabSetting(section, "max-chars-horizontal", "");
+  const [mergeShortPick, setMergeShort] = useTabSetting(section, "merge-short", "");
+  const [switching, setSwitching] = useState(false);
   const [topicWords, setTopicWords] = useState("");
   const [moreOpen, setMoreOpenState] = useState(() => stored("srt-more-options", "") === "open");
   const setMoreOpen = open => { setMoreOpenState(open); store("srt-more-options", open ? "open" : "closed"); };
@@ -397,6 +406,16 @@ export default function Workspace({ section, preset, meta, active }) {
   const maybeHinglish = transcribing && (scriptPick === "hinglish" ||
     (scriptPick === AUTO_SCRIPT && ["auto", "hi", "ur", "hinglish"].includes(language)));
   const speed = quality === "fast" || quality === "accurate" ? quality : meta?.quality_default || "accurate";
+  const capMode = captionMode === "word" ? "word" : "line";
+  const defaultChars = meta?.max_chars?.[format] || (format === "vertical" ? 30 : 42);
+  const maxWords = Number(maxWordsPick) || meta?.max_words || 5;
+  const maxChars = Number(format === "vertical" ? maxCharsV : maxCharsH) || defaultChars;
+  const setMaxChars = format === "vertical" ? setMaxCharsV : setMaxCharsH;
+  const mergeShort = mergeShortPick ? mergeShortPick === "on" : !!meta?.merge_short_default;
+  const captionFields = () => ({
+    caption_mode: capMode, max_words: String(maxWords), max_chars: String(maxChars),
+    merge_short: mergeShort ? "true" : "false",
+  });
   const [hinglishModel, downloadModel] = useHinglishModel(active && maybeHinglish);
   const aiOn = useAiPolish(active);  // the provider's name while AI polish is on, else null
 
@@ -497,7 +516,7 @@ export default function Workspace({ section, preset, meta, active }) {
     if (!file || !lyrics.trim() || working) return;
     setJob(null);
     submit("/api/jobs", {
-      ...fileFields(), lyrics, strip_tags: stripTags, video_format: format, language,
+      ...fileFields(), lyrics, strip_tags: stripTags, video_format: format, language, ...captionFields(),
     }, s => finished(s));
   }
 
@@ -543,10 +562,32 @@ export default function Workspace({ section, preset, meta, active }) {
 
   function approveDone(s) { finished(s); }
 
+  /** Line by line / Word by word on a finished SRT: rebuilt on the server from the same word
+      timings (no new alignment or transcription), then shown in a fresh Review panel. */
+  async function switchCaptions(mode) {
+    if (!job?.id || switching) return;
+    setCaptionMode(mode);
+    setSwitching(true);
+    try {
+      const res = await fetch(`/api/jobs/${job.id}/captions`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode }),
+      });
+      if (!res.ok) {
+        const { error } = await res.json().catch(() => ({}));
+        setSwitching(false);
+        window.alert(error || "Couldn't rebuild the subtitles.");
+        return;
+      }
+      poll(job.id, s => { setSwitching(false); finished(s); });
+    } catch {
+      setSwitching(false);
+    }
+  }
+
   function approve() {
     if (!job?.id || !lyrics.trim() || working) return;
     submit(`/api/jobs/${job.id}/approve`, {
-      lyrics, strip_tags: false, video_format: format, language,
+      lyrics, strip_tags: false, video_format: format, language, ...captionFields(),
     }, s => approveDone(s));
   }
 
@@ -677,12 +718,25 @@ export default function Workspace({ section, preset, meta, active }) {
             <div className="segmented">
               <button className={`segment${format === "vertical" ? " on" : ""}`} onClick={() => setFormat("vertical")}>
                 <span className="segment-frame v" />
-                <span><b>Vertical 9:16</b><span>Reels · Shorts · max 25 chars</span></span>
+                <span><b>Vertical 9:16</b><span>Reels · Shorts · max {format === "vertical" ? maxChars : meta?.max_chars?.vertical || 30} chars</span></span>
               </button>
               <button className={`segment${format === "horizontal" ? " on" : ""}`} onClick={() => setFormat("horizontal")}>
                 <span className="segment-frame h" />
-                <span><b>Horizontal 16:9</b><span>YouTube · TV · max 42 chars</span></span>
+                <span><b>Horizontal 16:9</b><span>YouTube · TV · max {format === "horizontal" ? maxChars : meta?.max_chars?.horizontal || 42} chars</span></span>
               </button>
+            </div>
+          </section>
+
+          <section className="field">
+            <h2 className="field-label">Captions</h2>
+            <div className="segmented capmode" role="radiogroup" aria-label="Captions" data-testid="capmode">
+              {[["line", "Line by line", `Up to ${maxWords} words, natural cuts`], ["word", "Word by word", "One word at a time"]].map(([code, title, hint]) => (
+                <button key={code} role="radio" aria-checked={capMode === code}
+                  className={`segment${capMode === code ? " on" : ""}`} disabled={working || switching}
+                  onClick={() => (phase === "done" && job?.id && code !== capMode ? switchCaptions(code) : setCaptionMode(code))}>
+                  <span><b>{title}</b><span>{hint}</span></span>
+                </button>
+              ))}
             </div>
           </section>
 
@@ -840,7 +894,24 @@ export default function Workspace({ section, preset, meta, active }) {
                   </div>
                 </div>
               )}
-              {!transcribing && !maybeHinglish && <p className="lang-note">{copy.rules}</p>}
+              <div className="caplimits" data-testid="caption-limits">
+                <span className="langpick-label">Caption length</span>
+                <label className="caplimit">
+                  <input type="number" min={1} max={12} value={maxWords} disabled={working}
+                    onChange={e => setMaxWords(e.target.value)} aria-label="Most words per caption" /> words
+                </label>
+                <label className="caplimit">
+                  <input type="number" min={10} max={80} value={maxChars} disabled={working}
+                    onChange={e => setMaxChars(e.target.value)} aria-label="Most characters per caption" /> characters
+                  <span className="muted"> ({format === "vertical" ? "vertical" : "horizontal"})</span>
+                </label>
+                <label className="check">
+                  <input type="checkbox" checked={mergeShort} disabled={working}
+                    onChange={e => setMergeShort(e.target.checked ? "on" : "off")} data-testid="merge-short" />
+                  Merge very short captions (under {meta?.merge_short_seconds || 0.5} s) into their neighbour when they fit
+                </label>
+                <p className="lang-note">{CAPTION_RULES} {copy.rules} Applies to the next SRT you make.</p>
+              </div>
             </div>
           </details>
 
@@ -954,7 +1025,10 @@ export default function Workspace({ section, preset, meta, active }) {
                 )}
 
                 <Review key={`${job.id}-${reviewKey}`} jobId={job.id}
-                  initialCues={(job.edited_cues || job.cues || []).map(c => ({ start: c.start, end: c.end, text: c.text }))}
+                  initialCues={(job.edited_cues || job.cues || []).map(c => ({ start: c.start, end: c.end, text: c.text,
+                                                                               ...(c.ai ? { ai: c.ai } : {}) }))}
+                  captionMode={job.caption_mode || capMode} onCaptionMode={switchCaptions} switching={switching}
+                  checkWith={job.check_with}
                   edited={!!job.edited} cap={job.max_chars} player={playerRef} time={playTime}
                   duration={duration} playing={playing} active={active} onCues={setReviewCues}
                   srtName={job.srt_name} hasVocals={job.has_vocals}
