@@ -57,7 +57,9 @@ Caption rules: one line per caption; at most {max_words} words and about {max_ch
 at natural reading points; keep phrases whole (prepositional phrases like "for her son", "in a size \
 4"); keep subjects with their verbs; never end a caption on a weak word (the, a, an, to, of, and, \
 but, just, is, ka, ki, ke, aur, toh…); punctuation that ends a phrase always ends a caption; one \
-speaker per caption. {mode_note}
+speaker per caption; a caption always ends after every token listed in "must_end_after" (a pause, \
+the end of a script line, a speaker change or phrase-ending punctuation), so never put one of \
+those inside a caption. {mode_note}
 
 Answer with JSON only: {{"tokens": [{{"i": 3, "t": "corrected"}}, ...], "cue_starts": [0, 5, 9, ...]}}. \
 List only the tokens you changed. cue_starts must start with 0 and cover every caption, in order."""
@@ -94,6 +96,9 @@ def build_request(tokens: list[dict], chunks: list[list[int]], *, words: list[di
                     **({"speaker": words[t["w0"]]["speaker"]} if words[t["w0"]].get("speaker") else {})}
                    for k, t in enumerate(tokens)],
         "cue_starts": [c[0] for c in chunks],
+        # V4.6.1: the hard breaks the cuts are checked against (they used to be checked, not sent).
+        **({"must_end_after": [r[-1] for r in captions.runs(tokens, words, rules)[:-1]]}
+           if rules["mode"] == "line" else {}),
     }
     return json.dumps(payload, ensure_ascii=False, indent=1)
 
@@ -190,10 +195,13 @@ def review(tokens: list[dict], words: list[dict], chunks: list[list[int]], setti
     if rules["mode"] == "line" and starts is not None:
         bounds = starts + [len(tokens)]
         proposed = [list(range(a, b)) for a, b in zip(bounds, bounds[1:])]
-        if captions.check_chunks(new_tokens, words, proposed, rules):
-            new_chunks = proposed
-        elif starts != [c[0] for c in chunks]:  # unchanged cuts its own text fix made wrong: recut quietly
-            notes.append("its line cuts broke the caption rules, so the rule-based cuts were kept")
+        merged, refused = captions.merge_cuts(new_tokens, words, proposed, rules)
+        if merged != captions.line_chunks(new_tokens, words, rules):
+            new_chunks = merged
+        if refused and starts != [c[0] for c in chunks]:  # unchanged cuts its own text fix made wrong: recut quietly
+            where = "" if new_chunks is None else f" in {refused} phrase{'s' if refused > 1 else ''}"
+            notes.append(f"its line cuts broke the caption rules{where}, so the rule-based cuts were kept"
+                         + (" there" if where else ""))
     if dropped:
         notes.append(f"{dropped} change(s) that replaced a word with a different one were ignored")
     result.update(tokens=new_tokens, chunks=new_chunks, changes=len(edits),

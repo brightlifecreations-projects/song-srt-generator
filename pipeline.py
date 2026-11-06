@@ -417,6 +417,9 @@ def whisper_code(language: str | None, transcribing: bool = False) -> str | None
     return config.LANGUAGE_ALIASES.get(language, language)
 
 
+HINGLISH_LABEL = "Hinglish (Hindi written in Roman letters)"
+
+
 def language_name(code: str | None) -> str:
     names = dict(config.LANGUAGES)
     if code in names:
@@ -1315,9 +1318,13 @@ def build_layout(ctx: dict, rules: dict, ai: dict | None, report=lambda key, msg
         provider = ai_polish.provider_name(ai["provider"])
         report("check", f"Final check with {provider}…")
         current = chunks if chunks is not None else [[k] for k in range(len(tokens))]
+        # Hinglish is timed with the English model, but the AI is told what the text really is (V4.6.1).
+        if "hinglish" in (rules.get("language"), ctx.get("script")):
+            language = HINGLISH_LABEL
+        else:
+            language = language_name(ctx["whisper_language_used"]) if ctx.get("whisper_language_used") else None
         result = final_check.review(tokens, words, current, ai, section=ctx["section"],
-                                    language=language_name(ctx.get("whisper_language_used"))
-                                    if ctx.get("whisper_language_used") else None,
+                                    language=language,
                                     script=ctx.get("script"), script_text=tl.get("script_text"), rules=rules)
         message = result["message"]
         tl["ai"][key] = {"chunks": result["chunks"], "message": message}
@@ -1326,9 +1333,9 @@ def build_layout(ctx: dict, rules: dict, ai: dict | None, report=lambda key, msg
         _log_ai(ctx, result, rules)
     if rules["mode"] == "line":
         saved = tl["ai"].get(key, {}).get("chunks")
-        chunks = saved if saved and captions.check_chunks(tokens, words, saved, rules) \
+        chunks = captions.merge_cuts(tokens, words, saved, rules)[0] if saved \
             else captions.line_chunks(tokens, words, rules)
-    cues = captions.build_cues(tokens, words, rules, chunks)
+    cues = captions.build_cues(tokens, words, {**rules, "audio_end": ctx.get("duration")}, chunks)
     return {"cues": cues, "ai_message": message, "ai_provider": provider,
             "ai_changes": sum(len(c.get("ai", [])) for c in cues)}
 
