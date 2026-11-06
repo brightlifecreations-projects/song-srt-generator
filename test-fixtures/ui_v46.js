@@ -1,4 +1,4 @@
-// v4.6 end-to-end UI checks (Windows: run by ui_edge.py; files, in order:
+// v4.6 end-to-end UI checks (Windows: run by ui_edge.py; Mac: ui_check.py; files, in order:
 //   sample/clip.wav, drama.mp4, a reel video with a Hindi file name, hinglish.mp3).
 // Every page and mode; Line by line and Word by word; the Review panel against the file the
 // browser actually downloaded (count, start, end, text, CRLF, no BOM); unsaved edits; the final AI
@@ -298,7 +298,7 @@ await navTo("Updates");
 await sleep(1500);
 const upd = await (await fetch("/api/updates")).json();
 log("Updates:", upd);
-check("Updates: GitHub mode (no Sparkle on Windows)", upd.mode === "github");
+check("Updates: GitHub mode (Windows, a checkout) or Sparkle (the Mac app)", ["github", "sparkle"].includes(upd.mode), upd.mode);
 await snap("updates");
 
 log("TIMINGS", timing);
