@@ -266,5 +266,4 @@ if [ "$PLATFORM" = "mac" ]; then
   echo "  Teammate steps: unzip → drag to Applications → open → Open Anyway (Privacy & Security) → wait for setup"
 else
   echo "  Teammate steps: unzip → Install.bat (Run anyway) → Start.bat"
-  echo "  NOTE: untested on real Windows hardware until a teammate runs it."
 fi

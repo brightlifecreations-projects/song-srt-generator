@@ -151,6 +151,38 @@ class FinalCheck(unittest.TestCase):
         self.assertTrue(final_check.plausible("sarah", "Sarah,"))
         self.assertFalse(final_check.plausible("apples", "bananas"))
 
+    def test_cuts_judged_phrase_by_phrase(self):
+        """V4.6.1: the hard breaks are sent as must_end_after, and one phrase with a bad cut keeps
+        the rule-based cuts there without throwing away the AI's good cuts elsewhere."""
+        self.words = timed("my old friend called me today. i went to the store with sarah and bought apples")
+        self.tokens = captions.make_tokens(self.words, "en")
+        self.chunks = captions.line_chunks(self.tokens, self.words, self.rules)
+        # Rule-based: my old friend | called me today. || i went to the store | with sarah and bought apples
+        # AI: my old friend called | me today. (fits) || … | with sarah and | bought apples ("and" ends one)
+        result, fake = self.run_check({"tokens": [], "cue_starts": [0, 4, 6, 11, 14]})
+        self.assertEqual(fake.sent[1]["must_end_after"], [5])
+        rule_second = [c for c in captions.line_chunks(self.tokens, self.words, self.rules) if c[0] >= 6]
+        self.assertEqual(result["chunks"], [[0, 1, 2, 3], [4, 5]] + rule_second)
+        self.assertIn("in 1 phrase", result["message"])
+        self.assertTrue(captions.check_chunks(self.tokens, self.words, result["chunks"], self.rules))
+
+    def test_hinglish_is_named_for_the_ai(self):
+        """Hinglish is timed with the English model, but the request names the text as Hinglish."""
+        import pipeline
+        seen = {}
+        original, log_ai = final_check.review, pipeline._log_ai
+        pipeline._log_ai = lambda *a: None
+        final_check.review = lambda *a, **kw: seen.update(kw) or {
+            "tokens": a[0], "chunks": None, "changes": 0, "message": None, "sent": "{}", "returned": None}
+        try:
+            for script, expected in (("hinglish", pipeline.HINGLISH_LABEL), ("same", "English")):
+                ctx = {"timeline": {"words": self.words, "tokens": self.tokens, "ai": {}}, "section": "reels",
+                       "whisper_language_used": "en", "script": script, "job_dir": Path("/nonexistent")}
+                pipeline.build_layout(ctx, self.rules, SETTINGS)
+                self.assertEqual(seen["language"], expected)
+        finally:
+            final_check.review, pipeline._log_ai = original, log_ai
+
     def test_active_needs_a_provider_and_the_switch(self):
         original = ai_polish.load_settings
         try:

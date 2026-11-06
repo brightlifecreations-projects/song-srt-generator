@@ -223,6 +223,32 @@ class WordByWord(unittest.TestCase):
         for a, b in zip(cues, cues[1:]):
             self.assertLessEqual(a["end"], b["start"])
 
+    def test_words_parked_at_end_of_audio(self):
+        """V4.6.1: a line the aligner couldn't place lands on the file's last instant with no time
+        (real reel: "hai. All the best." at 138.04–138.04). Each word still gets MIN_WORD, taken
+        from the pause before, never past the end of the audio, never overlapping; and a run of
+        zero-length words in mid-file pushes into the next word instead of flashing for 1 ms."""
+        words = words_of("koi idea nahi hai.", "hai. All the best.")
+        for w in words[4:]:
+            w["start"] = w["end"] = 10.0              # parked on the end of a 10 s file
+        words[1]["end"] = words[1]["start"]           # mid-file: "idea" given no time…
+        words[2]["start"] = words[1]["start"]         # …and "nahi" starts at the same instant
+        rules = {**line_rules(mode="word"), "audio_end": 10.0}
+        cues = captions.build_cues(captions.make_tokens(words), words, rules)
+        self.assertEqual(len(cues), 8)
+        for c in cues:
+            self.assertGreaterEqual(round(c["end"] - c["start"], 3), captions.MIN_WORD, c)
+            self.assertLessEqual(c["end"], 10.0)
+        for a, b in zip(cues, cues[1:]):
+            self.assertLessEqual(a["end"], b["start"])
+        self.assertEqual(cues[-1]["end"], 10.0)
+        self.assertGreaterEqual(cues[4]["start"], cues[3]["end"])  # the end words used the pause
+        # Line by line keeps its own, smaller minimum and the same audio-end cap.
+        line = captions.build_cues(captions.make_tokens(words), words, {**line_rules(), "audio_end": 10.0})
+        self.assertLessEqual(line[-1]["end"], 10.0)
+        for c in line:
+            self.assertGreaterEqual(round(c["end"] - c["start"], 3), captions.MIN_VISIBLE)
+
     def test_switching_mode_keeps_word_times(self):
         words = words_of("one two three four five six seven eight")
         tokens = captions.make_tokens(words)

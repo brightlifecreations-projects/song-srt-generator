@@ -33,6 +33,7 @@ END_TAIL = 0.1           # a caption stays this long after its last word ends (n
 WORD_GAP_FILL = 1.0      # word by word: a gap shorter than this is bridged (the word stays up)
 MERGE_SHORT_SECONDS = 0.5
 MIN_VISIBLE = 0.08      # no caption is shorter than this (two frames); see _min_visible()
+MIN_WORD = 0.15         # word by word: no word is on screen for less than this (V4.6.1)
 TRANSCRIBE_PAUSE = 0.7   # transcribe mode: a pause at least this long starts a new caption
 
 # Words a caption must not end on (articles, prepositions, conjunctions, auxiliaries,
@@ -571,6 +572,32 @@ def check_chunks(tokens, words, chunks: list[list[int]], rules: dict) -> bool:
     return True
 
 
+def merge_cuts(tokens, words, proposed: list[list[int]], rules: dict) -> tuple[list[list[int]], int]:
+    """Cut points proposed by the AI, phrase by phrase (V4.6.1): within each stretch between hard
+    boundaries, its captions are used when every one keeps the rules (fits, doesn't cross the
+    stretch, doesn't end on a weak word); a stretch that breaks one keeps the rule-based cuts.
+    Returns (chunks, number of stretches whose different cuts were refused)."""
+    base = line_chunks(tokens, words, rules)
+    if [k for c in proposed for k in c] != list(range(len(tokens))) or any(not c for c in proposed):
+        return base, 1
+    weak = weak_end(rules.get("language"))
+    out, refused = [], 0
+    for run in runs(tokens, words, rules):
+        a, b = run[0], run[-1]
+        mine = [c for c in proposed if a <= c[0] <= b]
+        rule = [c for c in base if a <= c[0] <= b]
+        if mine and mine[0][0] == a and mine[-1][-1] == b and all(
+                _chunk_ok(tokens, words, c, rules) and (c[-1] == b or core(tokens[c[-1]]["text"]) not in weak)
+                for c in mine):
+            out += mine
+        else:
+            out += rule
+            refused += [c[0] for c in mine] != [c[0] for c in rule]
+    if [k for c in out for k in c] != list(range(len(tokens))):  # merge_short joined across stretches
+        return base, refused or 1
+    return out, refused
+
+
 def line_chunks(tokens, words, rules: dict) -> list[list[int]]:
     chunks = [p for run in runs(tokens, words, rules) for p in break_run(tokens, words, run, rules)]
     if rules.get("merge_short"):
@@ -644,28 +671,36 @@ def build_cues(tokens: list[dict], words: list[dict], rules: dict,
         if i + 1 < len(cues) and cues[i + 1]["start"] <= cue["start"]:
             cues[i + 1]["start"] = round(cue["start"] + 0.001, 3)
             cue["end"] = cues[i + 1]["start"]
-    _min_visible(cues, rules.get("min_visible", MIN_VISIBLE))
+    minimum = rules.get("min_word", MIN_WORD) if rules["mode"] == "word" else rules.get("min_visible", MIN_VISIBLE)
+    _min_visible(cues, minimum, rules.get("audio_end"))
     for i, cue in enumerate(cues):
         cue["index"] = i + 1
     return cues
 
 
-def _min_visible(cues: list[dict], minimum: float):
-    """The aligner sometimes squeezes a word into no time at all ("My" at 0.360–0.360), which would
-    make a caption that flashes for a millisecond. Give such a caption `minimum` seconds: into the
-    gap after it, else from the start of the next caption when that one stays at least as long.
-    Never an overlap; the words keep their own timestamps."""
+def _min_visible(cues: list[dict], minimum: float, audio_end: float | None = None):
+    """The aligner sometimes squeezes words into no time at all ("My" at 0.360–0.360; a line it
+    couldn't find, parked on the last instant of the file). Give every caption `minimum` seconds,
+    never overlapping and never past `audio_end`. First forwards: into the time after it, moving
+    the next caption's start later (it then takes its own time from what follows). Then, where the
+    end of the audio left no room, backwards: into the time before it. The words keep their own
+    timestamps."""
+    limit = round(audio_end, 3) if audio_end else math.inf  # cue times are whole milliseconds (V4.6)
+    for c in cues:  # nothing runs past the audio (the end tail, or words parked on its last instant)
+        c["start"], c["end"] = min(c["start"], limit), min(c["end"], limit)
     for i, cue in enumerate(cues):
-        if cue["end"] - cue["start"] >= minimum:
-            continue
-        want = round(cue["start"] + minimum, 3)
-        nxt = cues[i + 1] if i + 1 < len(cues) else None
-        if nxt is None or want <= nxt["start"]:
-            cue["end"] = want
-        elif nxt["end"] - want >= minimum:
-            nxt["start"] = cue["end"] = want
-        else:
-            cue["end"] = max(cue["end"], nxt["start"])
+        if cue["end"] - cue["start"] < minimum:
+            cue["end"] = round(min(cue["start"] + minimum, limit), 3)
+            nxt = cues[i + 1] if i + 1 < len(cues) else None
+            if nxt and nxt["start"] < cue["end"]:
+                nxt["start"] = cue["end"]
+                nxt["end"] = max(nxt["end"], nxt["start"])
+    for i in range(len(cues) - 1, -1, -1):
+        cue = cues[i]
+        if cue["end"] - cue["start"] < minimum - 0.0005:
+            cue["start"] = round(max(0.0, cue["end"] - minimum), 3)
+            if i and cues[i - 1]["end"] > cue["start"]:
+                cues[i - 1]["end"] = cue["start"]
 
 
 # ---------------------------------------------------------------------------
