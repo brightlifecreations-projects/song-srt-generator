@@ -433,6 +433,66 @@ Recorded 2026-07-15 from Aman's answers.
 - `make_release.sh --windows` no longer says "untested on real Windows hardware" (V4.6 tested it). Earlier release notes keep the sentence: it was true for those versions.
 - **Verified on the Mac:** 66 unit tests; `ui_v46.js` 72/72 in WKWebView (`ui_check.py`, separate data folder, mock AI received `must_end_after`).
 
+## V4.7 — A real Windows app: installer, own window, WinSparkle updates (2026-11-10)
+
+**Windows only.** The Mac app is unchanged and stays on 4.6.1 (its Sparkle feed keeps serving 4.6.1; see "Release" below). Built and published from the Windows laptop.
+
+- **The app** (`winapp/`), the counterpart of `macapp/`:
+  - `SRT Generator.exe` (`launcher.cs`, compiled by `make_release_windows.ps1` with the C# compiler that ships with Windows, icon embedded). On the first launch, or if the venv is gone, a small splash window stays up while the bundled uv creates a private Python 3.10 and venv in the data folder and installs only the window's packages (pywebview, pythonnet and friends, pinned, read from `requirements-windows.txt`). It then starts `winapp\launcher.py` with the venv's `pythonw.exe` and exits.
+  - `launcher.py` mirrors `macapp/launcher.py`:
+    - single instance (a named mutex, `SRTGeneratorApp`; another version still running after an update is stopped, the same version is focused through `/api/focus`);
+    - the setup progress window (`progress.html`: packages, models and test run to PASS, then the Hinglish offer, then a stamp with the version and requirements hash, so an update re-runs only what changed);
+    - the server on a thread, the UI in a pywebview window (Edge WebView2), with the app's icon set on the form and a taskbar AppUserModelID matching the shortcuts;
+    - closing the window quits the app and stops the server.
+  - **Data** goes in `%LOCALAPPDATA%\SRT Generator\`: python, venv, uv-cache, models, jobs, corrections.md, settings, install.log, webview storage. The installed app is `%LOCALAPPDATA%\Programs\SRT Generator\` and is never written to.
+  - **Migration:** before the first setup, if there are no models yet, an old zip install with models or jobs (`C:\srt`, `C:\SRT-Generator`, `C:\SRT Generator`, or `SRT-Generator` / `SRT Generator` in Desktop, Documents or Downloads) is offered in the progress window. Yes moves `models` and `jobs` (a rename on the same drive; an item already in the data folder wins, and the old copy stays put) and copies `corrections.md`, `ai-settings.json`, `hinglish-spellings.md` and `number-exceptions.txt` when the data folder has none. It's offered once (`migration-offered`).
+  - `winapp/make_icon.py` makes `app.ico` (16–256 px) from `macapp/icon-source.png`.
+- **Installer** (`winapp/installer.iss`, Inno Setup 6.7.4):
+  - per user, no admin, `{localappdata}\Programs\SRT Generator`, Windows 10+ x64;
+  - Start Menu shortcut, optional desktop shortcut, and the Apps entry with an uninstaller;
+  - [Run] reopens the app after every install, silent ones included, which is how an update relaunches.
+  - Setup waits up to 10 s for the app to quit (WinSparkle asks it to), then stops it via the pid in `app.lock`. Uninstall asks to close the app if it's open.
+  - After uninstalling it deletes the WinSparkle settings key and asks **"Also delete your SRT Generator data?"**, default **No** (a silent uninstall keeps the data).
+  - **`RedirectionGuard=no`:** Inno 6.7's default mitigation is inherited by everything a non-elevated Setup starts, including the reopened app, which then couldn't follow the junction uv makes for its Python ("untrusted mount point", OS error 448, seen in the first test install). The mitigation protects elevated installers against privilege escalation; this one never elevates.
+  - **Prebuilt wheels:** openai-whisper, stable-ts and proxy-tools have no wheels on PyPI. Built from source in the data folder's uv cache, proxy-tools failed with a too-long path in testing. `winapp/build_wheels.py` builds the three once at release time; the installer ships them in `wheels\`, and both installs use `--find-links`.
+- **Updates** (`winapp/winupdater.py`): WinSparkle 0.9.4 (MIT, `COPYING.WinSparkle.txt` shipped beside the DLL), loaded with ctypes. The DLL is copied into the data folder and loaded from there, so the running app never locks a file the installer replaces.
+  - **Feed:** `…/releases/latest/download/appcast-windows.xml`. For tests only, an `appcast-url.txt` in the data folder overrides it (logged as TEST FEED).
+  - **Signatures:** an EdDSA public key in the app. Daily checks, which are on by default; the user's switch is WinSparkle's own registry value and is never overwritten.
+  - **The app's side:** the shutdown callback closes the window; `Backend` (mode `winsparkle`) serves the Updates page. **Check for updates** shows WinSparkle's window, **Update now** is `win_sparkle_check_update_with_ui_and_install`, and **Download and install automatically** (our `update-settings.json`) installs what a scheduled check finds. "Check for updates…" is in the app menu (pywebview menu).
+  - **Updates page:** `native = sparkle || winsparkle` gives Update now, HTML notes, and both switches enabled.
+  - **Appcast:** each item carries `sparkle:installerArguments="/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-"`. The notes carry their own light CSS, because WinSparkle's old HTML view renders black on black in Windows dark mode (seen).
+- **Windows release key:** ed25519, generated on the laptop by `winapp/release_key.py` (cryptography + keyring, in the release tools venv `release-assets\tools-venv`).
+  - The private seed is only in Windows Credential Manager (generic credential "SRT Generator release key (Windows)", user `eddsa-ed25519`), plus one backup file written to the Desktop for the owner's password manager.
+  - Public key `Q38yXnQGJ/pyvtmN3QxpC1oIyvOYTBITuPvB3ef76v4=` (in `winupdater.py`; the release script refuses to sign if the two differ).
+  - Signatures are made in memory, the key is never written to a file in the repo or the build, and every signature is checked again with WinSparkle's own `winsparkle-tool verify`.
+- **Release script** (`make_release_windows.ps1 <version> [-Publish] [-DownloadBase] [-MergeFrom]`):
+  - **Builds:** the cached tools, the frontend, the staged app, the compiled exe, the wheels, the installer, the win-lite zip (the same content as `make_release.sh --windows`, with the CRLF/ASCII guards), the signature, and `appcast-windows.xml` merged with the published feed (newest five).
+  - **Publishes:** creates `v<version>` with `--latest`, or adds to it, and uploads the three files. When the release has no `*-mac.zip`, it attaches `appcast.xml` from the newest release that has one, unchanged, so the Mac feed URL keeps working.
+- **Requirements:** `requirements-windows.txt` adds pywebview 6.2.1, pythonnet 3.1.0, clr-loader 0.3.1, proxy-tools 0.1.0 and bottle 0.13.4 (nothing else moved).
+- **Verified on this laptop** (Windows 11, AMD Ryzen, 16 GB) before publishing:
+  - **Dev run:** the exe and launcher from a checkout, with a separate data folder.
+    - Bootstrap 2 s with a warm cache. Setup: packages 58 s, test run 82 s.
+    - The native window has the icon and the menu. A second launch focused the running window. Closing the window stopped the server.
+  - **Fresh install (4.7):** silent Setup.exe in 9 s, creating the Start Menu and desktop shortcuts and the Apps entry (SRT Generator 4.7, BrightLife Creations).
+    - First launch: bootstrap, then the migration offer found `C:\srt` (2.4 GB of models, 0 jobs). "Move them here" moved the models in about 1 s. Packages 69 s, test run 68 s, no download.
+    - **The 72-check UI suite inside the app's own WebView2 window** (`ui_edge.py` with `UI_ATTACH_PORT`, the app started with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223`): 71/72. The one failure was the suite's Updates check, which didn't know the `winsparkle` mode (fixed in `ui_v46.js`).
+  - **Fresh install with no old install to migrate** (after a data folder was deleted on uninstall): first launch about 12.5 minutes, including the roughly 2.3 GB model download.
+  - **A tampered installer is rejected:** a 4.7.1 Setup.exe with one byte appended, its length updated in a local feed, and the genuine signature. WinSparkle downloaded it and said "Update Error! The update is improperly signed." No installer ran, and the app stayed on 4.7.
+  - **A real update:**
+    - **Feed and check:** a throwaway 4.7.1 (`-DownloadBase http://127.0.0.1:8899 -MergeFrom none`) was served locally, with the override file pointing 4.7 at it. **SRT Generator → Check for updates…** (clicked in the window) made WinSparkle find "4.7.1 is now available (you have 4.7)".
+    - **Install update:** WinSparkle downloaded and verified it (about 2.5 minutes for 74 MB inside WinSparkle; the same file downloads in 0.15 s with curl), asked the app to quit, and Setup installed silently in 8 s and reopened the app. The app ran "Updating to version 4.7.1" (no downloads) and served 4.7.1 about 3.5 minutes after the click.
+    - **Cleanup:** the override file, the local server and the test files were removed. WinSparkle stored no "skip this version".
+  - **Uninstall:**
+    - The silent uninstall removes the app, the shortcuts and the Apps entry, and keeps the data.
+    - Interactively, with the app open: "SRT Generator is open. Close it and uninstall?" → Yes stopped it, then Inno's confirmation, then "Also delete your SRT Generator data?".
+    - Both answers were seen: Yes deleted the data folder (the owner answered it during a test), and No kept it (`install.log` of the uninstaller: "User chose No"; a marker file and the models survived). The WinSparkle registry key was removed both times.
+  - **Unit tests:** 73 pass (`tests/test_windows_app.py`: appcast items and the newest-five rule, moving jobs and models without overwriting, finding old installs, the public key's format; the sign/verify round trip runs in the release tools venv).
+- **Not verified:**
+  - SmartScreen on a PC that downloads the Setup.exe from the internet (this one built it locally; the installer isn't Authenticode-signed, so SmartScreen will warn until it builds reputation, hence the README's "More info → Run anyway").
+  - "Download and install automatically" firing from a scheduled check.
+  - Another Windows PC, and a non-English or OneDrive-redirected profile.
+- **Known cosmetic:** WinSparkle's windows show Python's icon, because they take it from the process that loaded the DLL (`pythonw.exe`).
+
 ## Hard rules (per brief, as amended by Aman)
 
 No Docker, no databases, no Electron, no cloud calls at runtime (owner-approved exceptions: the V3.6 GitHub update check, now Windows/checkouts only, and Sparkle's daily appcast check on Mac, V4.0, and the one-time Hinglish model download, V4.2; plus the opt-in AI polish, V4.3, which sends transcript text only to a provider the user picks and pays for, and is off until a key is added), no paid APIs (except that opt-in), no accounts, no telemetry. App must run without any coding agent present. (The brief's original "Python + Gradio only, no React" rule was lifted by Aman for V3.)

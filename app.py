@@ -270,7 +270,7 @@ def _github_check():
 @app.get("/api/updates")
 def updates_state():
     if update_backend is not None:
-        return {"version": VERSION, "mode": "sparkle", **update_backend.state()}
+        return {"version": VERSION, "mode": getattr(update_backend, "mode", "sparkle"), **update_backend.state()}
     settings = _update_settings()
     if settings["auto_check"] and _github["last_checked"] is None:
         _github_check()  # once per app run

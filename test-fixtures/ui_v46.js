@@ -298,7 +298,8 @@ await navTo("Updates");
 await sleep(1500);
 const upd = await (await fetch("/api/updates")).json();
 log("Updates:", upd);
-check("Updates: GitHub mode (Windows, a checkout) or Sparkle (the Mac app)", ["github", "sparkle"].includes(upd.mode), upd.mode);
+check("Updates: GitHub (a checkout or the zip), Sparkle (the Mac app) or WinSparkle (the Windows app)",
+  ["github", "sparkle", "winsparkle"].includes(upd.mode), upd.mode);
 await snap("updates");
 
 log("TIMINGS", timing);
