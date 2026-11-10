@@ -492,6 +492,11 @@ Recorded 2026-07-15 from Aman's answers.
   - "Download and install automatically" firing from a scheduled check.
   - Another Windows PC, and a non-English or OneDrive-redirected profile.
 - **Known cosmetic:** WinSparkle's windows show Python's icon, because they take it from the process that loaded the DLL (`pythonw.exe`).
+- **Published 2026-11-10** from the Windows laptop (`make_release_windows.ps1 4.7 -Publish`, tag `v4.7` on the merge commit of PR #17). The first publish attempt stopped before uploading anything: Windows PowerShell 5.1 turns gh's "release not found" on stderr into an error under `$ErrorActionPreference = "Stop"`, so `gh release view` now runs through `cmd /c`.
+  - **The release:** latest, not a draft. Assets: `SRT-Generator-4.7-Setup.exe`, `SRT-Generator-4.7-win-lite.zip`, `appcast-windows.xml`, and `appcast.xml` copied unchanged from v4.6.1, the newest release with a Mac build.
+  - **Windows feed:** `…/releases/latest/download/appcast-windows.xml` serves 4.7. Its enclosure downloads at exactly the advertised length, and `winsparkle-tool verify` with the app's public key says "Valid signature."
+  - **Mac feed:** `…/releases/latest/download/appcast.xml` serves 4.6.1, byte-identical to v4.6.1's.
+  - **Installed from the published Setup.exe** (same SHA-256 as the local build): the quick setup took 45 s, no downloads. The Updates page's **Check for updates** said "You're up to date (4.7)", mode `winsparkle`. The 72-check UI suite then passed 72/72 inside that installed app's own window.
 
 ## Hard rules (per brief, as amended by Aman)
 
