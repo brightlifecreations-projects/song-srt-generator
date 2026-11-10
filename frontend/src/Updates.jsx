@@ -39,6 +39,7 @@ export default function Updates({ active, onChange }) {
   if (!state) return <div className="updatespage" hidden={!active} />;
   const busy = ["checking", "downloading", "extracting", "installing"].includes(state.status);
   const mac = state.mode === "sparkle";
+  const native = mac || state.mode === "winsparkle";  // the apps: Sparkle (Mac) or WinSparkle (Windows)
   const a = state.available;
 
   return (
@@ -66,7 +67,7 @@ export default function Updates({ active, onChange }) {
               <h2 className="card-title">Version {a.version} is available</h2>
               <p className="card-hint">You have {state.version}.</p>
             </div>
-            {mac ? (
+            {native ? (
               <button className="go small" disabled={busy} data-testid="update-now"
                 onClick={async () => apply(await (await post("/api/updates/install")).json())}>
                 {state.status === "downloading" ? "Downloading…" : state.status === "extracting" ? "Preparing…"
@@ -80,7 +81,7 @@ export default function Updates({ active, onChange }) {
             <div className="proc-progress"><i style={{ width: `${Math.round(state.progress * 100)}%` }} /></div>
           )}
           {state.status === "installing" && <p className="card-hint">Installing — the app will quit and reopen on its own.</p>}
-          {mac
+          {native
             ? <div className="upd-notes" dangerouslySetInnerHTML={{ __html: safeHtml(a.notes_html) }} />
             : <pre className="upd-notes plain">{a.notes}</pre>}
         </section>
@@ -102,10 +103,11 @@ export default function Updates({ active, onChange }) {
           <div>
             <b>Download and install automatically</b>
             <p className="card-hint">{mac ? "New versions download in the background and install the next time the app quits."
-              : "Mac only — on Windows, updates install from the release page."}</p>
+              : native ? "When the daily check finds a new version, it downloads, installs and reopens the app on its own."
+              : "In the installed app only — this copy updates from the release page."}</p>
           </div>
           <label className="switch">
-            <input type="checkbox" checked={!!state.auto_install} disabled={!mac} aria-label="Download and install automatically"
+            <input type="checkbox" checked={!!state.auto_install} disabled={!native} aria-label="Download and install automatically"
               onChange={async e => apply(await (await post("/api/updates/settings", { auto_install: e.target.checked }, "PUT")).json())} />
             <span className="switch-track" /> {state.auto_install ? "On" : "Off"}
           </label>

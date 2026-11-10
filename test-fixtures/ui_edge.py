@@ -86,23 +86,31 @@ def main():
     downloads = out / "downloads"
     shutil.rmtree(downloads, ignore_errors=True)
     downloads.mkdir()
+    # UI_ATTACH_PORT: drive the Windows app's own window (Edge WebView2 started with
+    # WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<port>) instead of a headless Edge.
+    attach = os.environ.get("UI_ATTACH_PORT")
+    port = int(attach) if attach else PORT
     profile = tempfile.mkdtemp(prefix="edge-profile-")
-    proc = subprocess.Popen([EDGE, "--headless=new", f"--remote-debugging-port={PORT}", f"--user-data-dir={profile}",
-                             "--no-first-run", "--no-default-browser-check", "--disable-extensions",
-                             "--disable-component-extensions-with-background-pages", "--disable-sync",
-                             "--window-size=1400,1000", "--autoplay-policy=no-user-gesture-required",
-                             "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = None if attach else subprocess.Popen(
+        [EDGE, "--headless=new", f"--remote-debugging-port={PORT}", f"--user-data-dir={profile}",
+         "--no-first-run", "--no-default-browser-check", "--disable-extensions",
+         "--disable-component-extensions-with-background-pages", "--disable-sync",
+         "--window-size=1400,1000", "--autoplay-policy=no-user-gesture-required",
+         "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(100):
             try:
-                urllib.request.urlopen(f"http://127.0.0.1:{PORT}/json/version", timeout=1)
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1)
                 break
             except Exception:
                 time.sleep(0.2)
-        # A tab of our own: extensions or sync can open tabs of theirs in a fresh profile.
-        req = urllib.request.Request(f"http://127.0.0.1:{PORT}/json/new?about:blank", method="PUT")
-        page = json.load(urllib.request.urlopen(req, timeout=10))
-        browser_ws = json.load(urllib.request.urlopen(f"http://127.0.0.1:{PORT}/json/version"))["webSocketDebuggerUrl"]
+        if attach:  # the app's one window
+            page = next(t for t in json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=5))
+                        if t["type"] == "page")
+        else:  # a tab of our own: extensions or sync can open tabs of theirs in a fresh profile
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/json/new?about:blank", method="PUT")
+            page = json.load(urllib.request.urlopen(req, timeout=10))
+        browser_ws = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version"))["webSocketDebuggerUrl"]
         # The download setting lasts only while the session that made it stays connected (headless
         # Edge refuses downloads otherwise), so this connection stays open for the whole run.
         bws = connect(browser_ws, max_size=None)
@@ -192,7 +200,8 @@ def main():
             return 0 if str(value).startswith("OK") else 1
     finally:
         # Edge starts a tree of helper processes; terminate() would only stop the first one.
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+        if proc:  # never the app's own window
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
         shutil.rmtree(profile, ignore_errors=True)
 
 

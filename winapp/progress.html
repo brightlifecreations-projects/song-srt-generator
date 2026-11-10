@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SRT Generator</title>
+<style>
+  :root {
+    --paper: #f5f6f9; --panel: #ffffff; --ink: #0f1320; --ink-soft: #3d4457; --muted: #7b8398;
+    --line: #dfe2ea; --accent: #3a4ee8; --accent-soft: rgba(58, 78, 232, 0.08); --ok: #17805b; --leak: #cf2e1e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #0b0e17; --panel: #121624; --ink: #e7eaf3; --ink-soft: #b3bacd; --muted: #737b92;
+      --line: #232a3f; --accent: #6b7dff; --accent-soft: rgba(107, 125, 255, 0.13); --ok: #4ecf9d; --leak: #ff5747;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: var(--paper); color: var(--ink);
+    font: 15px/1.55 "Segoe UI", system-ui, sans-serif;
+    -webkit-user-select: none; cursor: default;
+  }
+  .card { width: min(620px, calc(100vw - 48px)); }
+  .kicker {
+    font: 11px Consolas, ui-monospace, monospace; letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--accent); display: flex; align-items: center; gap: 10px;
+  }
+  .kicker::before { content: ""; width: 22px; height: 1px; background: var(--accent); }
+  h1 { font: 600 32px/1.1 Georgia, "Times New Roman", serif; margin: 12px 0 6px; letter-spacing: -0.01em; }
+  .sub { color: var(--ink-soft); margin: 0 0 28px; }
+  ol { list-style: none; padding: 0; margin: 0 0 22px; display: grid; gap: 10px; }
+  li {
+    display: grid; grid-template-columns: 28px 1fr; gap: 12px; align-items: start;
+    padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+    color: var(--muted);
+  }
+  li b { display: block; font-weight: 600; }
+  li span.detail { font-size: 13px; }
+  .num {
+    width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
+    font: 12px Consolas, ui-monospace, monospace; border: 1px solid var(--line);
+  }
+  li.active { color: var(--ink); border-color: var(--accent); background: var(--accent-soft); }
+  li.active .num { border-color: var(--accent); color: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+  li.done .num { background: var(--ok); border-color: var(--ok); color: #fff; }
+  li.done b { color: var(--ink-soft); }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 6px var(--accent-soft); } }
+  .bar { height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; margin-bottom: 12px; }
+  .bar i { display: block; height: 100%; width: 35%; background: var(--accent); animation: slide 1.6s ease-in-out infinite; }
+  @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+  .log {
+    font: 12px/1.5 Consolas, ui-monospace, monospace; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 18px;
+  }
+  .error {
+    display: none; margin-top: 18px; padding: 14px 16px; border-radius: 10px;
+    border: 1px solid var(--leak); color: var(--leak); background: var(--panel);
+  }
+  .actions { display: none; gap: 10px; margin-top: 14px; }
+  button {
+    font: inherit; font-size: 14px; padding: 9px 16px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .failed .bar, .failed li.active .num { animation: none; }
+  .failed .bar i { display: none; }
+  .failed .error { display: block; }
+  .failed .actions { display: flex; }
+  .idle .bar i { animation: none; display: none; }
+  .offer {
+    display: none; margin: -8px 0 18px; padding: 14px 16px; border-radius: 10px;
+    border: 1px solid var(--accent); background: var(--accent-soft); color: var(--ink-soft);
+  }
+  .offer p { margin: 0 0 12px; }
+  .offer b { color: var(--ink); }
+  .offer-actions { display: flex; gap: 10px; }
+  .offering #offer { display: block; }
+  .migrating #migrate { display: block; }
+  .migrating .bar i { animation: none; display: none; }
+  .offering .bar i { animation: none; display: none; }
+</style>
+</head>
+<body class="idle">
+<div class="card">
+  <div class="kicker">SRT Generator</div>
+  <h1 id="title">Starting…</h1>
+  <p class="sub" id="sub">Everything installs into your SRT Generator data folder (in AppData). Setup needs internet once; after that the app works offline.</p>
+  <ol id="steps">
+    <li data-step="0" id="move-step" hidden><span class="num">↪</span><span><b>Move your models and jobs</b><span class="detail"></span></span></li>
+    <li data-step="1"><span class="num">1</span><span><b>Install the app's Python packages</b><span class="detail"></span></span></li>
+    <li data-step="2"><span class="num">2</span><span><b>Download the AI models and do a test run</b><span class="detail"></span></span></li>
+    <li data-step="3" id="hinglish-step" hidden><span class="num">3</span><span><b>Hinglish model (optional)</b><span class="detail"></span></span></li>
+  </ol>
+  <div class="offer" id="offer">
+    <p><b>Hinglish speech model — download it now?</b> It writes Hindi speech straight in Roman letters.
+      It's about <span id="offer-mb"></span> MB. If you skip it, it downloads the first time you transcribe Hinglish.</p>
+    <div class="offer-actions">
+      <button class="primary" onclick="choose(true)">Download now</button>
+      <button onclick="choose(false)">Later</button>
+    </div>
+  </div>
+  <div class="offer" id="migrate">
+    <p><b>Found an earlier SRT Generator in <span id="migrate-from"></span>.</b>
+      Move its AI models (<span id="migrate-gb"></span> GB) and its <span id="migrate-jobs"></span> job folders here?
+      Then nothing is downloaded again. Your corrections and settings are copied too. The old folder's
+      Start.bat would need to download the models again afterwards.</p>
+    <div class="offer-actions">
+      <button class="primary" onclick="migrate(true)">Move them here</button>
+      <button onclick="migrate(false)">No, download fresh</button>
+    </div>
+  </div>
+  <div class="bar"><i></i></div>
+  <div class="log" id="log"></div>
+  <div class="error" id="error"></div>
+  <div class="actions">
+    <button class="primary" onclick="pywebview.api.retry()">Try again</button>
+    <button onclick="pywebview.api.show_log()">Show the log</button>
+  </div>
+</div>
+<script>
+  const $ = id => document.getElementById(id);
+  function reset() {
+    document.body.className = "idle";
+    $("error").textContent = "";
+    $("log").textContent = "";
+  }
+  function begin(title, first) {
+    document.body.className = "";
+    $("title").textContent = title;
+    if (!first) $("sub").textContent = "Your AI models are already downloaded — this only takes a minute.";
+  }
+  function step(n, label, detail) {
+    document.querySelectorAll("#steps li").forEach(li => {
+      const k = Number(li.dataset.step);
+      li.className = k < n ? "done" : k === n ? "active" : "";
+      if (k < n) li.querySelector(".num").textContent = "✓";
+      if (k === n) {
+        li.querySelector("b").textContent = label;
+        li.querySelector(".detail").textContent = detail;
+      }
+    });
+    if (n === 3) $("hinglish-step").hidden = false;
+    if (n === 0) $("move-step").hidden = false;
+    if (n > 3) { $("title").textContent = label; $("log").textContent = detail; document.body.className = "idle"; }
+  }
+  function logLine(line) { $("log").textContent = line; }
+  function offerHinglish(mb) {
+    $("offer-mb").textContent = mb;
+    document.querySelectorAll("#steps li").forEach(li => { if (Number(li.dataset.step) < 3 && !li.hidden) { li.className = "done"; li.querySelector(".num").textContent = "✓"; } });
+    $("log").textContent = "";
+    document.body.className = "offering";
+  }
+  function offerMigration(from, gb, jobs) {
+    $("migrate-from").textContent = from;
+    $("migrate-gb").textContent = gb;
+    $("migrate-jobs").textContent = jobs;
+    document.body.className = "migrating";
+  }
+  function migrate(yes) {
+    document.body.className = "";
+    pywebview.api.migrate_choice(yes);
+  }
+  function choose(now) {
+    document.body.className = "";
+    pywebview.api.hinglish_choice(now);
+  }
+  function fail(message) {
+    document.body.className = "failed";
+    $("error").textContent = message + " If it keeps failing, send Aman the log (Show the log).";
+  }
+</script>
+</body>
+</html>
