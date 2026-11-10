@@ -189,7 +189,9 @@ if (-not $Publish) { exit 0 }
 # ---------------------------------------------------------------- 6. Publish to GitHub
 Step "Publishing v$Version"
 $tag = "v$Version"
-gh release view $tag -R $Repo *> $null
+# Through cmd: Windows PowerShell turns a native command's stderr ("release not found") into an
+# error when $ErrorActionPreference is Stop.
+cmd /c "gh release view $tag -R $Repo >nul 2>nul"
 if ($LASTEXITCODE -eq 0) {
     Step "Release $tag exists: adding the Windows assets"
     Run gh release upload $tag -R $Repo --clobber $Setup $Zip $Appcast
