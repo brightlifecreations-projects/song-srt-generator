@@ -88,11 +88,18 @@ class FinalCheck(unittest.TestCase):
         self.assertIsNone(result["chunks"])
 
     def test_word_count_change(self):
-        result, _ = self.run_check({"tokens": [{"i": 3, "t": "the big"}], "cue_starts": [0]})
-        self.assertIn("number of words", result["message"])
-        self.assertEqual(self.texts(result), [t["text"] for t in self.tokens])
+        """V4.8: a change that adds or drops a word is refused on its own (with the reason for the
+        job log); the AI's other changes are still used."""
+        result, _ = self.run_check({"tokens": [{"i": 3, "t": "the big"}, {"i": 6, "t": "Sarah"}],
+                                    "cue_starts": [0]})
+        self.assertIn("refused", result["message"])
+        self.assertIn("number of words", result["refused"][0]["why"])
+        self.assertEqual(result["refused"][0]["to"], "the big")
+        self.assertEqual(self.texts(result)[3], "teh")
+        self.assertEqual(self.texts(result)[6], "Sarah")
         result, _ = self.run_check({"tokens": [{"i": 3, "t": ""}], "cue_starts": [0]})
-        self.assertIn("number of words", result["message"])
+        self.assertIn("number of words", result["refused"][0]["why"])
+        self.assertEqual(self.texts(result), [t["text"] for t in self.tokens])
         result, _ = self.run_check({"tokens": [{"i": k, "t": "x"} for k in range(len(self.tokens) + 1)],
                                     "cue_starts": [0]})
         self.assertIn("more words", result["message"])
@@ -143,6 +150,29 @@ class FinalCheck(unittest.TestCase):
         second, _ = self.run_check({"tokens": [{"i": idx["teh"], "t": "teh"}], "cue_starts": [0]})
         self.assertEqual(second["tokens"][idx["teh"]]["text"], "teh")
         self.assertNotIn("orig", second["tokens"][idx["teh"]])
+
+    def test_unsure_words_are_flagged(self):
+        result, fake = self.run_check({"tokens": [], "cue_starts": [0], "unsure": [6, 99]})
+        self.assertEqual(result["unsure"], [6])
+        self.assertTrue(result["tokens"][6].get("unsure"))
+        cues = captions.build_cues(result["tokens"], self.words, self.rules)
+        cue = next(c for c in cues if 6 in c["tokens"])
+        self.assertEqual(cue["unsure"], [cue["tokens"].index(6)])
+        self.assertNotIn("[?]", " ".join(c["text"] for c in cues))  # never in the SRT
+        self.assertIn("unsure", fake.sent[2]["required"])
+
+    def test_editorial_prompt(self):
+        _, fake = self.run_check({"tokens": [], "cue_starts": [0], "unsure": []})
+        system, sent, _ = fake.sent
+        for rule in ("Misheard", "proper nouns", "digits", "7:30", "symbol", "4-5 words", "one speaker",
+                     "[?]", "NEVER add, remove"):
+            self.assertIn(rule, system)
+        self.assertIn("no one", sent["number_exceptions"])
+
+    def test_sound_alike_fix_allowed(self):
+        self.assertTrue(final_check.plausible("rasta", "raasta"))
+        self.assertTrue(final_check.plausible("seven", "7:30"))
+        self.assertFalse(final_check.plausible("road", "zaroor"))
 
     def test_plausible(self):
         self.assertTrue(final_check.plausible("teh", "the"))

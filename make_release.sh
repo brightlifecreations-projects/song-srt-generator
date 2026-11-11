@@ -5,8 +5,10 @@
 #                                              + appcast.xml (Sparkle feed, EdDSA-signed zip)
 #   ./make_release.sh 4.0 --full             → ...-mac-full.zip, the .app with models baked in
 #   ./make_release.sh 4.0 --windows          → ...-win-lite.zip (x64 folder + Install.bat)
-#   ./make_release.sh 4.0 --publish          → GitHub release v4.0 with both zips + appcast.xml
-#                                              (build the mac and windows zips first)
+#   ./make_release.sh 4.0 --publish          → GitHub release v4.0: mac zip + appcast.xml (+ the win zip
+#                                              if built; with no Windows build, the newest
+#                                              appcast-windows.xml is attached unchanged)
+#                                              (build the mac zip first)
 #
 # The version must match the VERSION file (the single source of version numbers);
 # leave it out to use VERSION as is. Output lands in dist-release/. Downloads
@@ -46,18 +48,40 @@ WIN_ZIP="dist-release/SRT-Generator-${VERSION}-win-lite.zip"
 NOTES="release-notes/${VERSION}.md"
 
 if [ -n "$PUBLISH" ]; then
-  for f in "$MAC_ZIP" "$WIN_ZIP" dist-release/appcast.xml "$NOTES"; do
+  for f in "$MAC_ZIP" dist-release/appcast.xml "$NOTES"; do
     [ -f "$f" ] || { echo "!! $f is missing — build it first"; exit 1; }
   done
   grep -q "<sparkle:version>${VERSION}</sparkle:version>" dist-release/appcast.xml \
     || { echo "!! dist-release/appcast.xml has no item for ${VERSION}"; exit 1; }
+  ASSETS_UP=("$MAC_ZIP" dist-release/appcast.xml)
+  # The Windows zip is optional (V4.8): the Windows app is published by make_release_windows.ps1.
+  [ -f "$WIN_ZIP" ] && ASSETS_UP+=("$WIN_ZIP")
   if gh release view "v${VERSION}" -R "$REPO" >/dev/null 2>&1; then
-    echo "==> Release v${VERSION} exists: replacing its assets"
-    gh release upload "v${VERSION}" -R "$REPO" --clobber "$MAC_ZIP" "$WIN_ZIP" dist-release/appcast.xml
+    echo "==> Release v${VERSION} exists: replacing its Mac assets"
+    gh release upload "v${VERSION}" -R "$REPO" --clobber "${ASSETS_UP[@]}"
   else
     echo "==> Creating release v${VERSION}"
     gh release create "v${VERSION}" -R "$REPO" --verify-tag --latest \
-      --title "SRT Generator ${VERSION}" -F "$NOTES" "$MAC_ZIP" "$WIN_ZIP" dist-release/appcast.xml
+      --title "SRT Generator ${VERSION}" -F "$NOTES" "${ASSETS_UP[@]}"
+  fi
+  # The Windows feed is .../releases/latest/download/appcast-windows.xml. When this release has no
+  # Windows build, attach the appcast-windows.xml of the newest release that has one, unchanged, so
+  # Windows keeps working (the mirror of make_release_windows.ps1 for appcast.xml).
+  if ! gh release view "v${VERSION}" -R "$REPO" --json assets --jq '.assets[].name' | grep -q -- '-Setup\.exe$'; then
+    SOURCE=""
+    for t in $(gh release list -R "$REPO" -L 30 --json tagName --jq '.[].tagName'); do
+      [ "$t" = "v${VERSION}" ] && continue
+      NAMES="$(gh release view "$t" -R "$REPO" --json assets --jq '.assets[].name')"
+      if grep -qx 'appcast-windows.xml' <<<"$NAMES" && grep -q -- '-Setup\.exe$' <<<"$NAMES"; then
+        SOURCE="$t"; break
+      fi
+    done
+    [ -n "$SOURCE" ] || { echo "!! No earlier release has a Windows build and appcast-windows.xml"; exit 1; }
+    echo "==> No Windows build in v${VERSION}: attaching appcast-windows.xml from ${SOURCE} unchanged"
+    WIN_DIR="dist-release/windows-appcast"
+    rm -rf "$WIN_DIR" && mkdir -p "$WIN_DIR"
+    gh release download "$SOURCE" -R "$REPO" -p appcast-windows.xml -D "$WIN_DIR"
+    gh release upload "v${VERSION}" -R "$REPO" --clobber "$WIN_DIR/appcast-windows.xml"
   fi
   echo "✓ https://github.com/${REPO}/releases/tag/v${VERSION}"
   exit 0

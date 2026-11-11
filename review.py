@@ -9,8 +9,12 @@ import json
 import subprocess
 from collections import Counter
 
+import captions
 import corrections
 import pipeline
+
+
+LISTEN_STATUSES = ("ok", "fixed", "flag")
 
 
 def clean_cues(raw: list) -> list[dict]:
@@ -20,7 +24,8 @@ def clean_cues(raw: list) -> list[dict]:
     than silently dropped, and the order is kept (V4.6, preview = export)."""
     cues = []
     for c in raw:
-        start, end, text = float(c["start"]), float(c["end"]), " ".join(str(c["text"]).split())
+        # The same symbol rules as generated captions (V4.8); the panel applies them too.
+        start, end, text = float(c["start"]), float(c["end"]), captions.clean_caption(str(c["text"]))
         if not text:
             raise ValueError("empty cue")
         if not (0 <= start <= end <= 24 * 3600):
@@ -30,6 +35,15 @@ def clean_cues(raw: list) -> list[dict]:
               for a in (c.get("ai") or []) if isinstance(a, dict)]
         if ai:
             cue["ai"] = ai
+        unsure = [int(i) for i in (c.get("unsure") or []) if isinstance(i, int)]
+        if unsure:
+            cue["unsure"] = unsure
+        listen = c.get("listen")
+        if isinstance(listen, dict) and listen.get("status") in LISTEN_STATUSES:
+            cue["listen"] = {"status": listen["status"],
+                             "reasons": [str(r)[:300] for r in (listen.get("reasons") or [])][:5],
+                             "heard": str(listen.get("heard") or "")[:200],
+                             **({"resolved": True} if listen.get("resolved") else {})}
         cues.append(cue)
     if any(b["start"] < a["start"] for a, b in zip(cues, cues[1:])):
         raise ValueError("cues out of order")

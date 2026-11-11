@@ -9,11 +9,19 @@ import { useEffect, useRef, useState } from "react";
    cue text is kept single-spaced and never empty, the way the server writes it; and Download first
    commits a line still being typed and saves any pending edit, so the file always matches the list.
    The final AI check's changes (cue.ai: [{i: word position, from, to}]) are highlighted with the
-   original word and Undo. The Line by line / Word by word switch rebuilds the cues on the server. */
+   original word and Undo. The Line by line / Word by word switch rebuilds the cues on the server.
 
-import { MIN_CUE, autoFix, fmt, fmtMs, problems, r3 } from "./reviewFix.js";
+   V4.8: cue text follows the clean-caption rules as it's typed (cleanCaption, the server's rules).
+   The listening check's verdict (cue.listen: {status "ok" | "fixed" | "flag", reasons, heard}) shows
+   as an orange "Check this" with the reason, a Listen button (jump there and play) and "Looks right";
+   editing a flagged cue's text or timing counts as checked. Words the final AI check wasn't sure of
+   (cue.unsure: word positions) carry a [?] (never in the SRT). Above Download: what the check found,
+   and a Verified badge once nothing is left to check. */
 
-const clean = text => String(text).split(/\s+/).filter(Boolean).join(" ");
+import { MIN_CUE, autoFix, cleanCaption, fmt, fmtMs, problems, r3 } from "./reviewFix.js";
+
+const clean = cleanCaption;
+const flagged = c => c.listen?.status === "flag" && !c.listen.resolved;
 
 /** The AI's changes that are still in the text (the word at that position is the AI's word). */
 const liveAi = c => {
@@ -23,7 +31,7 @@ const liveAi = c => {
 
 export default function Review({ jobId, initialCues, edited: initiallyEdited, cap, player, time, duration,
                                  playing, active, onCues, srtName, hasVocals, vocalsLabel,
-                                 captionMode, onCaptionMode, switching, checkWith, checkMessage }) {
+                                 captionMode, onCaptionMode, switching, checkWith, checkMessage, listenSummary }) {
   const [hist, setHist] = useState({ past: [], present: initialCues, future: [] });
   const [sel, setSel] = useState(0);
   const [editing, setEditing] = useState(false);
@@ -115,7 +123,22 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
     if (v !== cues[i].text) update(i, { text: v });
   }
 
-  const update = (i, patch) => commit(cues.map((c, k) => (k === i ? { ...c, ...patch } : c)), i);
+  /** A change to a cue's text or timing counts as the user having checked it (V4.8). */
+  const update = (i, patch) => commit(cues.map((c, k) => {
+    if (k !== i) return c;
+    const next = { ...c, ...patch };
+    if (c.listen && ("text" in patch || "start" in patch || "end" in patch)) next.listen = { ...c.listen, resolved: true };
+    if ("text" in patch && clean(patch.text) !== c.text) delete next.unsure;
+    return next;
+  }), i);
+  const looksRight = i => update(i, { listen: { ...cues[i].listen, resolved: true } });
+  /** Jump to a cue a little before it starts, and play (the listening check's Listen button). */
+  function listen(i) {
+    setSel(i);
+    setEditing(false);
+    player.current?.seek(Math.max(0, cues[i].start - 0.5));
+    player.current?.play();
+  }
   const nudge = (i, field, d) => {
     const c = cues[i];
     const v = r3(Math.max(0, c[field] + d));
@@ -135,9 +158,11 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
     const t = r3(c.start + (c.end - c.start) * pos / c.text.length);
     const n = a.split(" ").length;
     const ai = liveAi(c);
+    const unsure = c.unsure || [];
     commit([...cues.slice(0, i),
-      { ...c, end: t, text: a, ai: ai.filter(x => x.i < n) },
-      { start: t, end: c.end, text: b, ai: ai.filter(x => x.i >= n).map(x => ({ ...x, i: x.i - n })) },
+      { ...c, end: t, text: a, ai: ai.filter(x => x.i < n), unsure: unsure.filter(x => x < n) },
+      { start: t, end: c.end, text: b, ai: ai.filter(x => x.i >= n).map(x => ({ ...x, i: x.i - n })),
+        unsure: unsure.filter(x => x >= n).map(x => x - n), ...(c.listen ? { listen: c.listen } : {}) },
       ...cues.slice(i + 1)], i);
     setEditing(false);
   }
@@ -145,8 +170,11 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
     if (i >= cues.length - 1) return;
     const a = cues[i], b = cues[i + 1];
     const n = a.text.split(" ").length;
+    const keep = [a, b].find(flagged) || a.listen || b.listen;
     commit([...cues.slice(0, i), { start: a.start, end: b.end, text: `${a.text} ${b.text}`,
-      ai: [...liveAi(a), ...liveAi(b).map(x => ({ ...x, i: x.i + n }))] }, ...cues.slice(i + 2)], i);
+      ai: [...liveAi(a), ...liveAi(b).map(x => ({ ...x, i: x.i + n }))],
+      unsure: [...(a.unsure || []), ...(b.unsure || []).map(x => x + n)],
+      ...(keep ? { listen: keep.listen || keep } : {}) }, ...cues.slice(i + 2)], i);
   }
   function remove(i) {
     commit(cues.filter((_, k) => k !== i), i);
@@ -251,12 +279,15 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
 
   function cueText(c, i) {
     const ai = liveAi(c);
-    if (!ai.length) return c.text;
+    const unsure = c.unsure || [];
+    if (!ai.length && !unsure.length) return c.text;
     const words = c.text.split(" ");
     return words.map((w, k) => {
       const change = ai.find(a => a.i === k);
       const gap = k < words.length - 1 ? " " : "";
-      if (!change) return w + gap;
+      const mark = unsure.includes(k)
+        ? <span className="unsure-mark" data-testid="unsure" title="The AI check wasn't sure of this word">[?]</span> : null;
+      if (!change) return <span key={k}>{w}{mark}{gap}</span>;
       return (
         <span key={k}>
           <span className="ai-fix" data-testid="ai-fix" tabIndex={0} title={`AI changed “${change.from}” to “${change.to}”`}>
@@ -265,11 +296,23 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
               was “{change.from}”
               <button onClick={() => undoAi(i, change)} data-testid="ai-undo">Undo</button>
             </span>
-          </span>{gap}
+          </span>{mark}{gap}
         </span>
       );
     });
   }
+
+  // What the listening check found, as it stands now (a checked or edited cue no longer counts).
+  const heardAny = cues.some(c => c.listen);
+  const toCheck = cues.filter(flagged).length;
+  const fixedCount = cues.filter(c => c.listen?.status === "fixed").length;
+  const okCount = cues.filter(c => c.listen && !flagged(c) && c.listen.status !== "fixed").length;
+  const nextToCheck = () => {
+    const after = cues.findIndex((c, k) => k > sel && flagged(c));
+    const k = after >= 0 ? after : cues.findIndex(flagged);
+    if (k >= 0) { listen(k); rowRefs.current[k]?.scrollIntoView({ block: "nearest" }); }
+  };
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
   const counts = issues.reduce((n, p) => ({ ...n, [p.kind]: (n[p.kind] || 0) + 1 }), {});
   return (
@@ -330,9 +373,10 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
           {cues.map((c, i) => {
             const bad = issues.filter(p => p.i === i);
             const on = i === sel;
+            const check = flagged(c);
             return (
               <div key={`${i}-${c.start}`} ref={el => (rowRefs.current[i] = el)}
-                className={`rcue${i === playingIdx ? " playing" : ""}${on ? " on" : ""}${bad.length ? " bad" : ""}`}
+                className={`rcue${i === playingIdx ? " playing" : ""}${on ? " on" : ""}${bad.length ? " bad" : ""}${check ? " check" : ""}`}
                 onClick={() => { if (!on) { go(i); setEditing(false); } }} data-testid="rcue">
                 <span className="cue-num">{String(i + 1).padStart(2, "0")}</span>
                 <span className="cue-time" title="Start and end, exactly as in the SRT">{fmtMs(c.start)}<br />{fmtMs(c.end)}</span>
@@ -348,6 +392,16 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
                     <span onDoubleClick={() => { setSel(i); setEditing(true); }}>{cueText(c, i)}</span>
                   )}
                   {bad.length > 0 && <small className="rcue-bad">{bad.map(p => p.text).join(" · ")}</small>}
+                  {check && (
+                    <small className="rcue-check" data-testid="listen-flag" onClick={e => e.stopPropagation()}>
+                      <b>Check this</b> · {c.listen.reasons.join(" · ")}
+                      <button onClick={() => listen(i)} data-testid="listen-jump" title="Jump here and listen">▶ Listen</button>
+                      <button onClick={() => looksRight(i)} data-testid="listen-ok">Looks right</button>
+                    </small>
+                  )}
+                  {c.listen?.status === "fixed" && (
+                    <small className="rcue-fixed" data-testid="listen-fixed">Fixed by the listening check · {c.listen.reasons.join(" · ")}</small>
+                  )}
                 </span>
                 {on && (
                   <div className="rcue-tools" onClick={e => e.stopPropagation()}>
@@ -376,10 +430,27 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
         </div>
       </div>
 
+      {heardAny && (
+        <div className={`listen-summary${toCheck ? "" : " clear"}`} data-testid="listen-summary">
+          <span>
+            Checked against the audio: {plural(okCount, "caption", "captions")} OK, {fixedCount} fixed,{" "}
+            {toCheck === 1 ? "1 needs" : `${toCheck} need`} your check
+            {listenSummary?.seconds != null && <span className="muted"> · {listenSummary.model}, {listenSummary.seconds} s</span>}
+          </span>
+          {toCheck > 0
+            ? <button className="loadtxt" onClick={nextToCheck} data-testid="listen-next">Next to check</button>
+            : <span className="verified-badge" data-testid="verified">Verified</span>}
+        </div>
+      )}
+      {!heardAny && listenSummary?.skipped && (
+        <p className="stage-note muted" data-testid="listen-skipped">Listening check skipped — {listenSummary.skipped}.</p>
+      )}
+
       <div className="download-row">
         <a className="dl-primary" href={`/api/jobs/${jobId}/srt`} onClick={download} data-testid="dl-srt">
           <span>
-            <b>Download SRT {edited && <span className="edited-badge" data-testid="edited-badge">Edited</span>}</b>
+            <b>Download SRT {edited && <span className="edited-badge" data-testid="edited-badge">Edited</span>}
+              {heardAny && !toCheck && <span className="edited-badge verified" data-testid="verified-badge">Verified</span>}</b>
             <span>{srtName} · {cues.length} cues · {captionMode === "word" ? "word by word" : "line by line"}</span>
           </span>
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"><path d="M8 2v9M4.5 7.5 8 11l3.5-3.5" /><path d="M2.5 13.5h11" /></svg>

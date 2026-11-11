@@ -16,6 +16,7 @@ const LIVE_LABELS = {
   "Align lyrics": "Aligning lyrics",
   "Align transcript": "Aligning transcript",
   "Build subtitles": "Building subtitles",
+  "Listening check": "Checking every caption against the audio",
 };
 const DEFAULT_STEPS = ["Isolate vocals", "Align lyrics", "Build subtitles"];
 
@@ -1026,9 +1027,11 @@ export default function Workspace({ section, preset, meta, active }) {
 
                 <Review key={`${job.id}-${reviewKey}`} jobId={job.id}
                   initialCues={(job.edited_cues || job.cues || []).map(c => ({ start: c.start, end: c.end, text: c.text,
-                                                                               ...(c.ai ? { ai: c.ai } : {}) }))}
+                                                                               ...(c.ai ? { ai: c.ai } : {}),
+                                                                               ...(c.unsure ? { unsure: c.unsure } : {}),
+                                                                               ...(c.listen ? { listen: c.listen } : {}) }))}
                   captionMode={job.caption_mode || capMode} onCaptionMode={switchCaptions} switching={switching}
-                  checkWith={job.check_with}
+                  checkWith={job.check_with} listenSummary={job.listen_summary}
                   edited={!!job.edited} cap={job.max_chars} player={playerRef} time={playTime}
                   duration={duration} playing={playing} active={active} onCues={setReviewCues}
                   srtName={job.srt_name} hasVocals={job.has_vocals}

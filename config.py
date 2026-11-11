@@ -138,6 +138,10 @@ UNMATCHED_LINE_PROBABILITY = 0.15
 # Final AI check (V4.6): longest wait for the provider before the rule-based captions are used.
 AI_REVIEW_TIMEOUT_SECONDS = 60
 
+# Listening check (V4.8, listen_check.py): after the captions are built, Whisper re-listens to the
+# audio and every caption is checked against it (offline). Always on; False only for debugging.
+LISTEN_CHECK = True
+
 # Fallback video format when none is sent: "vertical" (9:16 Reels/TikTok) or "horizontal" (16:9 YouTube).
 # Each section has its own default (SECTIONS below).
 FORMAT_DEFAULT = "vertical"

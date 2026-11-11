@@ -71,3 +71,40 @@ export function autoFix(cues, cap) {
   }
   return out;
 }
+
+/* V4.8 clean captions: letters, digits, spaces, full stops, apostrophes inside words, % after a
+   number and a time's colon; every other symbol goes. The same rules as captions.clean_caption()
+   on the server, character for character, so what the panel shows is what the SRT gets. */
+const STOPS = new Set([".", "\u0964"]);           // the full stop, and Hindi's (the danda)
+const APOSTROPHES = new Set(["'", "\u2019"]);
+const DASHES = new Set([..."-\u2010\u2011\u2012\u2013\u2014\u2015\u2212/\\|_~"]);
+const JOINERS = new Set(["\u200c", "\u200d"]);
+const wordy = ch => !!ch && /[\p{L}\p{M}\p{N}]/u.test(ch);
+const digit = ch => !!ch && /\p{Nd}/u.test(ch);
+export function cleanCaption(text) {
+  const chars = Array.from(String(text));
+  let out = "";
+  chars.forEach((ch, k) => {
+    const prev = chars[k - 1] || "", next = chars[k + 1] || "";
+    if (ch >= "\ufe00" && ch <= "\ufe0f") return;  // emoji variation selectors
+    if (wordy(ch)) out += ch;
+    else if (/\s/u.test(ch)) out += " ";
+    else if (STOPS.has(ch)) {
+      if (ch === "." && (prev === "." || next === "." || prev === "\u2026" || next === "\u2026")) return;
+      out += ch;
+    } else if (APOSTROPHES.has(ch)) { if (wordy(prev) && wordy(next)) out += ch; }
+    else if (ch === "%") { if (digit(prev)) out += ch; }
+    else if (ch === ":") { if (digit(prev) && digit(next)) out += ch; }
+    else if (JOINERS.has(ch)) { if (wordy(prev) && wordy(next)) out += ch; }
+    else if (DASHES.has(ch)) { if (wordy(prev) && wordy(next)) out += " "; }
+  });
+  const tidy = [];
+  for (const w of out.split(" ").filter(Boolean)) {
+    if (Array.from(w).every(c => STOPS.has(c))) {
+      if (tidy.length && !STOPS.has(tidy[tidy.length - 1].slice(-1))) tidy[tidy.length - 1] += w[0];
+      continue;
+    }
+    tidy.push(w.replace(/^[.\u0964]+/u, "") || w);
+  }
+  return tidy.join(" ");
+}

@@ -1,18 +1,21 @@
-"""Final AI check before output (DECISIONS.md V4.6).
+"""Final AI check before output (DECISIONS.md V4.6; a full editorial pass since V4.8).
 
 After the captions are built, and when an AI provider is set up on the AI & API keys page (with
 "Final AI check" on, the default), the cue texts go to that provider once more, with their word
 lists, the script (if any), the section, the language and the caption rules. The AI may only:
 
-- change the text of a word (token): stray quotes and apostrophes, capitalisation, punctuation,
-  numbers as digits, misspellings;
-- move cut points between existing words, where a line breaks the caption rules.
+- change the text of a word (token): misheard or misspelled words, capitalisation and proper
+  nouns, numbers as digits, punctuation (the clean-caption symbol rules are applied afterwards);
+- move cut points between existing words, to break lines by meaning;
+- mark words it isn't sure of ("unsure"), shown as [?] in the Review panel (never in the SRT).
 
 It answers with word indices and corrected text plus where each caption starts — never a new
 transcript — so it can't add or remove a spoken word, and the app rebuilds every time from the
-word timestamps: timing can't drift. Anything invalid (not JSON, an unknown index, a word split
-in two or deleted, a timeout…) keeps the rule-based captions and says so in one line. Without a
-provider, captions.offline_cleanup() has already done the offline part.
+word timestamps: timing can't drift. An answer that can't be read at all (not JSON, an unknown
+index, a timeout…) keeps the rule-based captions and says so in one line; otherwise each change
+is judged on its own, and only a change that breaks a rule (adds or drops a word, empties a
+word, swaps in an unrelated word) is refused, with the reason in the job log. Without a provider,
+captions.offline_cleanup() has already done the offline part.
 """
 
 import difflib
@@ -31,38 +34,48 @@ RESPONSE_SCHEMA = {
             "type": "object", "properties": {"i": {"type": "integer"}, "t": {"type": "string"}},
             "required": ["i", "t"], "additionalProperties": False}},
         "cue_starts": {"type": "array", "items": {"type": "integer"}},
+        "unsure": {"type": "array", "items": {"type": "integer"}},
     },
-    "required": ["tokens", "cue_starts"], "additionalProperties": False,
+    "required": ["tokens", "cue_starts", "unsure"], "additionalProperties": False,
 }
 
-SYSTEM_PROMPT = """You do the final check on subtitles (SRT captions) before they are exported. \
-The words were already timed to the audio; your job is the text and the line cuts only.
+SYSTEM_PROMPT = """You are the editor doing the final pass on subtitles (SRT captions) before they \
+are exported. The words were already timed to the audio; your job is the text and the line cuts.
 
 You get every word ("tokens", each with an index i and its text t) and the current captions (as the \
 index of the first token of each caption, "cue_starts"), plus context: the section, the language and \
-script, the user's own script when there is one, and the caption rules.
+script, the user's own script when there is one, the caption rules, and number_exceptions.
 
-You may ONLY:
-1. Change the text of a token: fix stray or unmatched quotation marks and apostrophes, capitalisation \
-(sentence case, proper nouns, "I"; a word the user's script writes in CAPS for emphasis stays in caps), \
-punctuation, numbers written as digits ("12 years", "Week 1", "7 a.m.", "70%", "size 4"; keep \
-expressions like "not one inch", "one time", "you two" in words), and misspellings.
-2. Move the cut points between captions (cue_starts) where a caption breaks the rules below.
+Do a full editorial pass:
+1. Misheard or misspelled words: fix a word that is clearly a mishearing or misspelling of the right \
+word in context (sound-alikes, names, brands, Hinglish spellings). When the user's script spells \
+something a certain way, follow the script.
+2. Capitalisation and proper nouns: sentence case, names and places capitalised, "I"; a word the user's \
+script writes in CAPS for emphasis stays in caps.
+3. Numbers as digits: "four" -> "4", "twenty five" stays two tokens but write "25" in the first and \
+leave the second as it is only if the app hasn't already joined them; "first" -> "1st", "seven thirty" \
+-> "7:30", "seventy percent" -> "70%", Hinglish counts (ek, do, teen -> 1, 2, 3) when they are numbers \
+(not "do" meaning "give"). Words in number_exceptions stay words ("no one", "someone", "the one").
+4. Clean-caption symbols: the app keeps only letters, digits, spaces, full stops, apostrophes inside \
+words, % after a number and the colon of a time; it removes every other symbol itself after the line \
+breaks are set. So never add quotation marks, dashes, brackets, slashes or emoji; you may keep or add \
+a comma or full stop where a phrase really ends, because punctuation guides the line breaks.
+5. Line breaks by meaning (cue_starts): aim for 4-5 words and at most {max_words} words and about \
+{max_chars} characters per caption; keep phrases whole (prepositional phrases like "for her son", "in \
+a size 4", a verb with its object, a subject with its verb); never end a caption on a weak word (the, \
+a, an, to, of, and, but, just, is, my, ka, ki, ke, aur, toh…); one speaker per caption; a caption \
+always ends after every token listed in "must_end_after" (a pause, the end of a script line, a speaker \
+change or phrase-ending punctuation), so never put one of those inside a caption. {mode_note}
+6. Anything you are unsure of (a word that may be misheard, a name you can't confirm): list its \
+token index in "unsure"; the user sees it marked [?]. Don't guess wildly: mark it instead.
 
-You must NEVER add, remove, merge, split or reorder words. Each token stays one token: a token's \
-new text has exactly as many words (space-separated parts) as before, and is never empty. Don't \
-rephrase or translate. When the user's script spells something a certain way, follow the script.
+You must NEVER add, remove, merge, split or reorder spoken words. Each token stays one token: a \
+token's new text has exactly as many words (space-separated parts) as before, and is never empty. \
+Don't rephrase or translate.
 
-Caption rules: one line per caption; at most {max_words} words and about {max_chars} characters; cut \
-at natural reading points; keep phrases whole (prepositional phrases like "for her son", "in a size \
-4"); keep subjects with their verbs; never end a caption on a weak word (the, a, an, to, of, and, \
-but, just, is, ka, ki, ke, aur, toh…); punctuation that ends a phrase always ends a caption; one \
-speaker per caption; a caption always ends after every token listed in "must_end_after" (a pause, \
-the end of a script line, a speaker change or phrase-ending punctuation), so never put one of \
-those inside a caption. {mode_note}
-
-Answer with JSON only: {{"tokens": [{{"i": 3, "t": "corrected"}}, ...], "cue_starts": [0, 5, 9, ...]}}. \
-List only the tokens you changed. cue_starts must start with 0 and cover every caption, in order."""
+Answer with JSON only: {{"tokens": [{{"i": 3, "t": "corrected"}}, ...], "cue_starts": [0, 5, 9, ...], \
+"unsure": [12, ...]}}. List only the tokens you changed. cue_starts must start with 0 and cover every \
+caption, in order. "unsure" may be empty."""
 
 WORD_MODE_NOTE = ("These are word-by-word captions (one word per caption): return cue_starts "
                   "unchanged; fix the text only.")
@@ -83,7 +96,8 @@ def active() -> dict | None:
 
 
 def build_request(tokens: list[dict], chunks: list[list[int]], *, words: list[dict], section: str,
-                  language: str | None, script: str | None, script_text: str | None, rules: dict) -> str:
+                  language: str | None, script: str | None, script_text: str | None, rules: dict,
+                  exceptions: list[str] | None = None) -> str:
     payload = {
         "section": {"song": "song lyrics", "drama": "drama dialogue",
                     "reels": "reel / YouTube speech"}.get(section, section),
@@ -92,6 +106,7 @@ def build_request(tokens: list[dict], chunks: list[list[int]], *, words: list[di
         "caption_mode": "word by word" if rules["mode"] == "word" else "line by line",
         "rules": {"max_words": rules["max_words"], "max_chars": rules["max_chars"]},
         "users_script": script_text or None,
+        "number_exceptions": exceptions if exceptions is not None else captions.DEFAULT_EXCEPTIONS,
         "tokens": [{"i": k, "t": t["text"],
                     **({"speaker": words[t["w0"]]["speaker"]} if words[t["w0"]].get("speaker") else {})}
                    for k, t in enumerate(tokens)],
@@ -108,18 +123,22 @@ def _letters(text: str) -> str:
 
 
 def plausible(original: str, new: str) -> bool:
-    """A spelling, case, punctuation or number fix — not a different word."""
+    """A spelling, case, punctuation, number or sound-alike fix — not a different word."""
     a, b = _letters(original), _letters(new)
     if a == b or not a or not b:
         return bool(b) or not a
-    if b.isdigit() or a.isdigit():
-        return True  # "five" -> "5"
-    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.5
+    if any(ch.isdigit() for ch in a + b):
+        return True  # "five" -> "5", "first" -> "1st", "seven" -> "7:30"
+    if difflib.SequenceMatcher(None, a, b).ratio() >= 0.5:
+        return True
+    import hinglish  # sounds alike, spelt differently: "Cindy" -> "Sydney", "rasta" -> "raasta"
+    return hinglish.similarity(a, b) >= 0.6 and len(hinglish.skeleton(a)) >= 3
 
 
-def validate(answer: str, tokens: list[dict]) -> tuple[dict[int, str], list[int] | None, int]:
-    """The AI's answer -> ({token index: new text}, cue_starts or None, changes dropped as
-    implausible). Raises ReviewError when the answer can't be used at all."""
+def validate(answer: str, tokens: list[dict]) -> tuple[dict[int, str], list[int] | None, list[dict], list[int]]:
+    """The AI's answer -> ({token index: new text}, cue_starts or None, refused changes
+    [{"i", "from", "to", "why"}], unsure token indices). Raises ReviewError when the answer can't be
+    used at all; a single change that breaks a rule is refused on its own."""
     body = re.sub(r"^```(?:json)?\s*|\s*```$", "", (answer or "").strip())
     try:
         data = json.loads(body)
@@ -129,7 +148,7 @@ def validate(answer: str, tokens: list[dict]) -> tuple[dict[int, str], list[int]
         raise ReviewError("invalid", "the AI's answer didn't have the expected fields")
     if len(data["tokens"]) > len(tokens):
         raise ReviewError("mismatch", "the AI returned more words than there are")
-    edits, dropped = {}, 0
+    edits, refused = {}, []
     for item in data["tokens"]:
         if not isinstance(item, dict) or not isinstance(item.get("i"), int) or not isinstance(item.get("t"), str):
             raise ReviewError("invalid", "the AI's answer didn't have the expected fields")
@@ -137,12 +156,19 @@ def validate(answer: str, tokens: list[dict]) -> tuple[dict[int, str], list[int]
         if not 0 <= k < len(tokens) or k in edits:
             raise ReviewError("invalid", "the AI referred to a word that doesn't exist")
         original = tokens[k]["text"]
-        if len(text.split()) != len(original.split()):
-            raise ReviewError("mismatch", "the AI changed the number of words")
         if text == original:
             continue
-        if not plausible(original, text):
-            dropped += 1
+        why = None
+        if not text:
+            why = "it emptied the word (the number of words would change)"
+        elif len(text.split()) != len(original.split()):
+            why = "it changed the number of words (a spoken word would be added or dropped)"
+        elif not plausible(original, text):
+            why = "it replaced the word with a different one, not a spelling or sound-alike fix"
+        elif not captions.clean_caption(text):
+            why = "only symbols would be left"
+        if why:
+            refused.append({"i": k, "from": original, "to": text, "why": why})
             continue
         edits[k] = text
     starts = data.get("cue_starts")
@@ -150,28 +176,32 @@ def validate(answer: str, tokens: list[dict]) -> tuple[dict[int, str], list[int]
         if not isinstance(starts, list) or not all(isinstance(x, int) for x in starts) or not starts \
                 or starts[0] != 0 or starts != sorted(set(starts)) or starts[-1] >= len(tokens):
             starts = None
-    return edits, starts, dropped
+    unsure = data.get("unsure") or []
+    unsure = sorted({x for x in unsure if isinstance(x, int) and 0 <= x < len(tokens)}) \
+        if isinstance(unsure, list) else []
+    return edits, starts, refused, unsure
 
 
 def review(tokens: list[dict], words: list[dict], chunks: list[list[int]], settings: dict, *,
            section: str, language: str | None, script: str | None, script_text: str | None,
-           rules: dict, timeout: float | None = None, adapter=None) -> dict:
+           rules: dict, timeout: float | None = None, adapter=None, exceptions: list[str] | None = None) -> dict:
     """Run the check. Returns {"tokens", "chunks" (None = rule-based cuts), "changes", "message",
-    "seconds", "sent", "returned"}. Never raises: any problem keeps the rule-based result."""
+    "seconds", "sent", "returned", "refused" (changes refused, with why), "unsure"}. Never raises:
+    any problem keeps the rule-based result."""
     t0 = time.perf_counter()
     name = ai_polish.provider_name(settings["provider"])
     mode_note = WORD_MODE_NOTE if rules["mode"] == "word" else ""
     system = SYSTEM_PROMPT.format(max_words=rules["max_words"], max_chars=rules["max_chars"], mode_note=mode_note)
     request = build_request(tokens, chunks, words=words, section=section, language=language, script=script,
-                            script_text=script_text, rules=rules)
+                            script_text=script_text, rules=rules, exceptions=exceptions)
     result = {"tokens": tokens, "chunks": None, "changes": 0, "message": None, "sent": request,
-              "returned": None, "provider": name}
+              "returned": None, "provider": name, "refused": [], "unsure": []}
     try:
         adapter = adapter or ai_polish.adapter_for(settings)
         adapter.timeout = timeout or config.AI_REVIEW_TIMEOUT_SECONDS
         answer = adapter.complete(system, request, schema=RESPONSE_SCHEMA)
         result["returned"] = answer
-        edits, starts, dropped = validate(answer, tokens)
+        edits, starts, rejected, unsure = validate(answer, tokens)
     except (ReviewError, ai_polish.PolishError) as e:
         result["message"] = f"Final AI check skipped — {e}. The rule-based captions were used."
         result["seconds"] = round(time.perf_counter() - t0, 2)
@@ -184,6 +214,9 @@ def review(tokens: list[dict], words: list[dict], chunks: list[list[int]], setti
     new_tokens = []
     for k, t in enumerate(tokens):
         t = dict(t)
+        t.pop("unsure", None)
+        if k in unsure:
+            t["unsure"] = True
         if k in edits:
             t["orig"] = t.get("orig", t["text"])
             t["text"] = edits[k]
@@ -202,9 +235,11 @@ def review(tokens: list[dict], words: list[dict], chunks: list[list[int]], setti
             where = "" if new_chunks is None else f" in {refused} phrase{'s' if refused > 1 else ''}"
             notes.append(f"its line cuts broke the caption rules{where}, so the rule-based cuts were kept"
                          + (" there" if where else ""))
-    if dropped:
-        notes.append(f"{dropped} change(s) that replaced a word with a different one were ignored")
-    result.update(tokens=new_tokens, chunks=new_chunks, changes=len(edits),
+    if rejected:
+        kinds = sorted({r["why"].split(" (")[0] for r in rejected})
+        notes.append(f"{len(rejected)} change(s) were refused and ignored ({'; '.join(kinds)}); "
+                     "the job log lists each one")
+    result.update(tokens=new_tokens, chunks=new_chunks, changes=len(edits), refused=rejected, unsure=unsure,
                   seconds=round(time.perf_counter() - t0, 2))
     if notes:
         result["message"] = f"Final AI check by {name}: " + "; ".join(notes) + "."

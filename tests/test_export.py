@@ -165,6 +165,11 @@ class ExportMatchesPreview(unittest.TestCase):
             edited[2]["end"] = round(edited[2]["start"] + 0.001, 3)
         del edited[-1]
         self.put(f"/api/jobs/{job_id}/cues", {"cues": edited})
+        # V4.8: the panel shows typed text after the clean-caption rules (cleanCaption, the same as the
+        # server's), so "नया “cue”" is shown, saved and downloaded as "नया cue".
+        for c in edited:
+            c["text"] = captions.clean_caption(c["text"])
+        self.assertEqual(edited[2]["text"], "नया cue")
         state = json.loads(self.get(f"/api/jobs/{job_id}"))
         self.assertTrue(state["edited"])
         download = self.get(f"/api/jobs/{job_id}/srt")

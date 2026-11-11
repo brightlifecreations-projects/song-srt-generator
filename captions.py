@@ -16,7 +16,8 @@ a cut point can never make the timing drift.
 Words:  {"word": raw aligned text, "start", "end", "line": script line, "speaker": str|None}
 Tokens: {"text": display text, "w0", "w1": first/last word index (inclusive), "orig": the text
          before the final AI check changed it (only when it did)}
-Cues:   {"index", "start", "end", "text", "tokens": [token indices], "words": [...], "ai": [...]}
+Cues:   {"index", "start", "end", "text", "tokens": [token indices], "words": [...], "ai": [...],
+         "unsure": [word positions the AI marked [?]], "listen": the listening check's verdict}
 """
 
 import math
@@ -196,10 +197,26 @@ _HINGLISH_SCALES = {"sau": 100, "hazaar": 1000, "hazar": 1000, "lakh": 100_000, 
 # Expressions that stay in words. Editable: number-exceptions.txt in the data folder.
 DEFAULT_EXCEPTIONS = [
     "not one", "no one", "one time", "one day", "one of", "one another", "one by one", "the one",
-    "this one", "that one", "which one", "every one", "anyone", "someone", "one more", "one thing",
-    "one last", "one and only", "you two", "us two", "the two of", "one or two", "a thousand times",
-    "one step at a time", "one love", "ek baar", "ek din", "ek dum", "ekdum", "do pal",
+    "this one", "that one", "which one", "every one", "anyone", "someone", "everyone", "one more",
+    "one thing", "one last", "one and only", "you two", "us two", "the two of", "one or two",
+    "a thousand times", "one step at a time", "one love", "as one", "become one", "we are one",
+    "at first", "first of all", "first things first", "first sight", "a second", "ek baar", "ek din",
+    "ek dum", "ekdum", "do pal",
 ]
+# Ordinals (V4.8): "first" -> "1st", "twenty-first" -> "21st". The cardinal each one stands for.
+_ORDINALS = {"first": "one", "second": "two", "third": "three", "fourth": "four", "fifth": "five",
+             "sixth": "six", "seventh": "seven", "eighth": "eight", "ninth": "nine", "tenth": "ten",
+             "eleventh": "eleven", "twelfth": "twelve", "thirteenth": "thirteen",
+             "fourteenth": "fourteen", "fifteenth": "fifteen", "sixteenth": "sixteen",
+             "seventeenth": "seventeen", "eighteenth": "eighteen", "nineteenth": "nineteen",
+             "twentieth": "twenty", "thirtieth": "thirty", "fortieth": "forty", "fiftieth": "fifty",
+             "sixtieth": "sixty", "seventieth": "seventy", "eightieth": "eighty", "ninetieth": "ninety",
+             "hundredth": "hundred", "thousandth": "thousand"}
+# "second" is also the unit of time ("wait a second"): an ordinal only after these, or in a compound.
+_SECOND_AFTER = set("the my your his her our their its every each".split())
+# Hinglish number words that are also ordinary words (do = give, saat = with, ek = a…): in a
+# counting run of two they stay words; a run of three or more ("ek do teen") is always counting.
+_HINGLISH_AMBIGUOUS = {"ek", "do", "saat", "das", "nau", "sau"}
 
 
 def load_exceptions(text: str | None) -> list[str]:
@@ -309,6 +326,45 @@ def _excepted(cores: list[str], i: int, exceptions: list[str]) -> bool:
     return False
 
 
+def _suffix(n: int) -> str:
+    return "th" if n % 100 in (11, 12, 13) else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+
+
+def _cardinal(word: str) -> str | None:
+    """An ordinal word as the cardinal it stands for ("first" -> "one", "twenty-first" ->
+    "twenty-one"), else None."""
+    if word in _ORDINALS:
+        return _ORDINALS[word]
+    parts = word.split("-")
+    if len(parts) == 2 and parts[0] in _TENS and parts[1] in _ORDINALS:
+        return f"{parts[0]}-{_ORDINALS[parts[1]]}"
+    return None
+
+
+def _hinglish_run(cores: list[str], i: int) -> int:
+    """How many Hinglish number words in a row (punctuation ignored) word i stands in."""
+    a = b = i
+    while a > 0 and cores[a - 1] in _HINGLISH:
+        a -= 1
+    while b + 1 < len(cores) and cores[b + 1] in _HINGLISH:
+        b += 1
+    return b - a + 1
+
+
+def _minutes(span: list[str]) -> tuple[int, int] | None:
+    """The minutes of a time said as "seven thirty" / "ten forty five" / "seven oh five": (minutes,
+    words used) at the start of span, or None."""
+    if len(span) >= 2 and span[0] in ("oh", "o") and span[1] in _UNITS and 0 < _UNITS[span[1]] < 10:
+        return _UNITS[span[1]], 2
+    if not span or not (span[0] in _TENS or span[0] in _UNITS and _UNITS[span[0]] >= 10
+                        or span[0].split("-")[0] in _TENS):
+        return None
+    found = _english_number(span)
+    if found and 10 <= found[0] <= 59 and not any(w in _SCALES for w in span[:found[1]]):
+        return found
+    return None
+
+
 def _number_at(words, cores, i, hinglish) -> tuple[str, int] | None:
     """(display text, words used) when a number starts at word i."""
     # Never run a number across a punctuation break or a script line.
@@ -319,34 +375,58 @@ def _number_at(words, cores, i, hinglish) -> tuple[str, int] | None:
         span.append(cores[k])
         if PUNCT_END.search(words[k]["word"]):
             break
-    english = _english_number(span)
+    # An ordinal ends the number: "twenty first" -> 21st. "second" only where it can't be time.
+    ordinal_at = next((k for k, w in enumerate(span) if _cardinal(w)), None)
+    plain = span
+    if ordinal_at is not None:
+        if span[ordinal_at] == "second" and ordinal_at == 0 and (i == 0 or cores[i - 1] not in _SECOND_AFTER):
+            plain = span[:0]
+        else:
+            plain = span[:ordinal_at] + [_cardinal(span[ordinal_at])]
+    english = _english_number(plain)
+    ordinal = bool(english) and ordinal_at is not None and english[1] == ordinal_at + 1
+    if english and ordinal_at is not None and not ordinal:
+        english = _english_number(span[:ordinal_at]) if ordinal_at else None
     value = used = None
+    suffix = ""
     if english:
         value, used = english
-        single = used == 1 and span[0] in _UNITS and _UNITS[span[0]] <= 10
-        if span[0] == "one" and used == 1 and not _counted(cores, words, i, 1):
-            return None  # "one" alone is usually a pronoun: "the one I love"
-        if span[0] == "one" and used == 1 and NEGATIONS & set(cores[max(0, i - 3):i]):
-            return None  # "not giving up one inch": an expression, not a count
-        if single and span[0] in ("two", "ten") and not _counted(cores, words, i, 1) and i > 0 \
+        if span[0] == "one" and used == 1 and i > 0 and (cores[i - 1] in DETERMINERS
+                                                           or cores[i - 1] in ("which", "each", "another", "little")):
+            return None  # "the one", "this one": a pronoun, not a count
+        if used == 1 and span[0] in ("two", "ten") and not _counted(cores, words, i, 1) and i > 0 \
                 and cores[i - 1] in ("you", "us", "we", "them"):
             return None
+        if ordinal:
+            suffix = _suffix(value)
+        elif used == 1 and 1 <= value <= 12:  # "seven thirty" -> 7:30
+            minutes = _minutes(span[1:])
+            if minutes:
+                after = cores[i + 1 + minutes[1]] if i + 1 + minutes[1] < len(cores) else ""
+                if after not in UNITS or after in ("a.m.", "p.m.", "am", "pm", "o'clock"):
+                    value, used = f"{value}:{minutes[0]:02d}", 1 + minutes[1]
     elif hinglish:
         h = _hinglish_number(span)
         if h and (_counted(cores, words, i, h[1]) or h[1] > 1 or span[0] in _HINGLISH_SCALES):
             value, used = h
-        if h and h[1] == 1 and span[0] in ("do", "saat", "das", "sau", "nau") and not _counted(cores, words, i, 1):
+        if h and h[1] == 1 and span[0] in _HINGLISH_AMBIGUOUS and not _counted(cores, words, i, 1):
             value = used = None  # do = give/two, saat = with/seven… only as a count
+        if h and value is None:  # counting: "ek do teen", "char paanch"
+            run = _hinglish_run(cores, i)
+            if run >= 3 or run == 2 and not any(cores[k] in _HINGLISH_AMBIGUOUS
+                                                 for k in range(max(0, i - 1), min(len(cores), i + 2))
+                                                 if cores[k] in _HINGLISH):
+                value, used = _HINGLISH[span[0]], 1
     if value is None:
         return None
     first, last = words[i]["word"], words[i + used - 1]["word"]
     lead = _split_edges(first)[0]
     trail = _split_edges(last)[2]
-    text = f"{value:,}" if value >= 10000 else str(value)
+    text = f"{value}{suffix}"  # no thousands commas: captions carry no commas (V4.8)
     # "seventy percent" -> "70%"
     nxt = i + used
-    if nxt < len(words) and cores[nxt] in ("percent", "per cent") and words[nxt]["line"] == words[i]["line"] \
-            and not PUNCT_END.search(last):
+    if not suffix and nxt < len(words) and cores[nxt] in ("percent", "per cent") \
+            and words[nxt]["line"] == words[i]["line"] and not PUNCT_END.search(last):
         trail = _split_edges(words[nxt]["word"])[2]
         return f"{lead}{text}%{trail}", used + 1
     return f"{lead}{text}{trail}", used
@@ -633,6 +713,71 @@ def _merge_short(tokens, words, chunks, rules) -> list[list[int]]:
 
 
 # ---------------------------------------------------------------------------
+# Clean captions (V4.8): letters, digits, spaces, full stops, apostrophes inside words, % after a
+# number and the colon of a time. Applied when the cues are built, after the line breaks were
+# chosen from the punctuation (break first, strip after). Review.jsx's cleanCaption() is the same.
+
+_JOINERS = {"\u200c", "\u200d"}            # ZWNJ / ZWJ: part of some Devanagari spellings
+_DASHES = set("-‐‑‒–—―−/\\|_~")           # between two words: a space ("well-known" -> "well known")
+_APOSTROPHES = {"'", "’"}
+_STOPS = {".", "।"}                            # the full stop, and Hindi's (the danda)
+
+
+def _wordy(ch: str) -> bool:
+    return bool(ch) and unicodedata.category(ch)[0] in "LMN"
+
+
+def _digit(ch: str) -> bool:
+    return bool(ch) and unicodedata.category(ch) == "Nd"
+
+
+def clean_caption(text: str) -> str:
+    """Caption text with every symbol removed except the ones captions keep (see above).
+    "“Don’t—stop!” 70 % at 7:30…" -> "Don’t stop 70 at 7:30"."""
+    out = []
+    n = len(text)
+    for k, ch in enumerate(text):
+        prev = text[k - 1] if k else ""
+        nxt = text[k + 1] if k + 1 < n else ""
+        cat = unicodedata.category(ch)
+        if "\ufe00" <= ch <= "\ufe0f":  # emoji variation selectors (category Mn)
+            continue
+        if cat[0] in "LMN":
+            out.append(ch)
+        elif ch.isspace():
+            out.append(" ")
+        elif ch in _STOPS:
+            if ch == "." and (prev == "." or nxt == "." or prev == "…" or nxt == "…"):
+                continue  # "..." is an ellipsis, not a full stop
+            out.append(ch)
+        elif ch in _APOSTROPHES:
+            if _wordy(prev) and _wordy(nxt):
+                out.append(ch)
+        elif ch == "%":
+            if _digit(prev):
+                out.append(ch)
+        elif ch == ":":
+            if _digit(prev) and _digit(nxt):
+                out.append(ch)
+        elif ch in _JOINERS:
+            if _wordy(prev) and _wordy(nxt):
+                out.append(ch)
+        elif ch in _DASHES:
+            if _wordy(prev) and _wordy(nxt):
+                out.append(" ")
+    words = "".join(out).split()
+    # A full stop left on its own (its word was a symbol) joins the word before it.
+    tidy = []
+    for w in words:
+        if all(c in _STOPS for c in w):
+            if tidy and not tidy[-1][-1] in _STOPS:
+                tidy[-1] += w[0]
+            continue
+        tidy.append(w.lstrip("".join(_STOPS)) or w)
+    return " ".join(tidy)
+
+
+# ---------------------------------------------------------------------------
 # Cues
 
 def build_cues(tokens: list[dict], words: list[dict], rules: dict,
@@ -647,14 +792,26 @@ def build_cues(tokens: list[dict], words: list[dict], rules: dict,
     cues = []
     for c in chunks:
         ws = [w for k in c for w in words[tokens[k]["w0"]:tokens[k]["w1"] + 1]]
-        cue = {"start": ws[0]["start"], "end": ws[-1]["end"],
-               "text": " ".join(tokens[k]["text"] for k in c), "tokens": list(c),
+        shown, ai, unsure = [], [], []
+        for k in c:
+            text = clean_caption(tokens[k]["text"])
+            if not text:
+                continue  # a token that was only a symbol ("—", "♪")
+            orig = tokens[k].get("orig")
+            if orig is not None and clean_caption(orig) != text and len(text.split()) == 1:
+                ai.append({"i": len(shown), "from": clean_caption(orig) or orig, "to": text})
+            if tokens[k].get("unsure"):
+                unsure.append(len(shown))
+            shown += text.split()
+        if not shown:
+            continue  # nothing left to show: the caption was only symbols
+        cue = {"start": ws[0]["start"], "end": ws[-1]["end"], "text": " ".join(shown), "tokens": list(c),
                "speaker": ws[0]["speaker"],
                "words": [{"word": w["word"], "start": w["start"], "end": w["end"]} for w in ws]}
-        ai = [{"i": pos, "from": tokens[k]["orig"], "to": tokens[k]["text"]}
-              for pos, k in enumerate(c) if tokens[k].get("orig") is not None]
         if ai:
             cue["ai"] = ai
+        if unsure:
+            cue["unsure"] = unsure
         cues.append(cue)
     for i, cue in enumerate(cues):
         nxt = cues[i + 1]["start"] if i + 1 < len(cues) else None
