@@ -52,10 +52,11 @@ word in context (sound-alikes, names, brands, Hinglish spellings). When the user
 something a certain way, follow the script.
 2. Capitalisation and proper nouns: sentence case, names and places capitalised, "I"; a word the user's \
 script writes in CAPS for emphasis stays in caps.
-3. Numbers as digits: "four" -> "4", "twenty five" stays two tokens but write "25" in the first and \
-leave the second as it is only if the app hasn't already joined them; "first" -> "1st", "seven thirty" \
--> "7:30", "seventy percent" -> "70%", Hinglish counts (ek, do, teen -> 1, 2, 3) when they are numbers \
-(not "do" meaning "give"). Words in number_exceptions stay words ("no one", "someone", "the one").
+3. Numbers as digits: the app has already turned most number words into digits (a two-word number \
+is one token, "25"); write any it missed as digits in that token: "four" -> "4", "first" -> "1st", \
+"seventy percent" -> "70%", Hinglish counts (ek, do, teen -> 1, 2, 3) when they are numbers (not "do" \
+meaning "give"). A token stays one token, so a number spread over two tokens keeps its words. Words in \
+number_exceptions stay words ("no one", "someone", "the one").
 4. Clean-caption symbols: the app keeps only letters, digits, spaces, full stops, apostrophes inside \
 words, % after a number and the colon of a time; it removes every other symbol itself after the line \
 breaks are set. So never add quotation marks, dashes, brackets, slashes or emoji; you may keep or add \

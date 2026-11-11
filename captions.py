@@ -187,7 +187,7 @@ _UNITS.pop("oh")
 _TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fourty": 40, "fifty": 50, "sixty": 60,
          "seventy": 70, "eighty": 80, "ninety": 90}
 _SCALES = {"hundred": 100, "thousand": 1000, "million": 1_000_000, "billion": 1_000_000_000}
-_HINGLISH = {"ek": 1, "do": 2, "teen": 3, "char": 4, "chaar": 4, "paanch": 5, "panch": 5, "chhe": 6,
+_HINGLISH = {"ek": 1, "do": 2, "teen": 3, "tin": 3, "char": 4, "chaar": 4, "paanch": 5, "panch": 5, "chhe": 6,
              "chhah": 6, "chheh": 6, "saat": 7, "aath": 8, "nau": 9, "das": 10, "gyarah": 11,
              "barah": 12, "baarah": 12, "terah": 13, "chaudah": 14, "pandrah": 15, "solah": 16,
              "satrah": 17, "atharah": 18, "unnis": 19, "bees": 20, "tees": 30, "chalis": 40,
@@ -216,7 +216,7 @@ _ORDINALS = {"first": "one", "second": "two", "third": "three", "fourth": "four"
 _SECOND_AFTER = set("the my your his her our their its every each".split())
 # Hinglish number words that are also ordinary words (do = give, saat = with, ek = a…): in a
 # counting run of two they stay words; a run of three or more ("ek do teen") is always counting.
-_HINGLISH_AMBIGUOUS = {"ek", "do", "saat", "das", "nau", "sau"}
+_HINGLISH_AMBIGUOUS = {"ek", "do", "saat", "das", "nau", "sau", "tin"}
 
 
 def load_exceptions(text: str | None) -> list[str]:

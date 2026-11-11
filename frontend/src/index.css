@@ -1107,7 +1107,9 @@ textarea.lyrics::placeholder { color: var(--muted); }
   border: 1px solid color-mix(in srgb, var(--check) 50%, transparent); background: var(--paper); color: var(--check); }
 .rcue-check button:hover { background: var(--check); color: var(--paper); }
 .rcue-fixed { color: var(--ok); font-size: 11.5px; }
-.unsure-mark { color: var(--check); font-family: var(--font-mono); font-size: 11px; margin-left: 2px; vertical-align: super; }
+.unsure-mark { color: var(--check); font-family: var(--font-mono); font-size: 11px; margin-left: 2px; vertical-align: super;
+  background: none; border: 0; padding: 0; cursor: pointer; }
+.listen-unsure { color: var(--check); }
 .listen-summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
   padding: 9px 12px; border-radius: 10px; font-size: 13px; color: var(--check); background: var(--check-soft);
   border: 1px solid color-mix(in srgb, var(--check) 35%, transparent); }

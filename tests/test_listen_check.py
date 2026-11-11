@@ -49,6 +49,9 @@ class FakeEar:
                       FakeEar.HEARD)
         return [w for w in source if t0 <= (w["start"] + w["end"]) / 2 <= t1]
 
+    def hear_many(self, spans):
+        return [self.hear(a, b) for a, b in spans]
+
     def realign(self, t0, t1, text):
         self.calls += 1
         self.realigned.append(text)
@@ -116,6 +119,20 @@ class Comparing(Base):
     def test_function_words_swapped_dont_count(self):
         FakeEar.HEARD = heard("give me the book")
         self.assertEqual(self.check("give me a book")["summary"]["flagged"], 0)
+
+    def test_number_words_equal_digits_in_any_context(self):
+        for a, b in (("2", "do"), ("3", "tin"), ("3", "teen"), ("4", "four"), ("1st", "first"), ("70", "seventy")):
+            self.assertEqual(lc.similarity(a, b), 1.0, (a, b))
+        self.assertEqual(lc.similarity("2", "3"), 0.0)
+
+    def test_ai_number_change_not_put_back(self):
+        """"ab do parts": the AI wrote "2", Whisper heard "do" — the same number, so it stays."""
+        words = timed("ab do parts")
+        tokens = captions.make_tokens(words, "hinglish")
+        tokens[1] = {**tokens[1], "orig": "do", "text": "2"}
+        FakeEar.HEARD = heard("ab do parts")
+        cue = self.check("", words=words, tokens=tokens)["cues"][0]
+        self.assertEqual((cue["text"], cue["listen"]["status"]), ("ab 2 parts", "ok"))
 
     def test_hinglish_spellings_agree(self):
         self.assertGreaterEqual(lc.similarity("jaroor", "zaroor"), lc.AGREE)
@@ -216,6 +233,13 @@ class AutoFix(Base):
         cue = self.check("hello there my friend", words=words)["cues"][0]
         self.assertEqual(cue["listen"]["status"], "ok")
 
+    def test_repeated_word_not_timed_by_the_other_one(self):
+        rules = {**RULES, "mode": "word"}
+        words = timed("asked for the shoes for her", start=1.0)
+        FakeEar.HEARD = heard("asked for the shoes for her", start=1.0)
+        out = self.check("", rules=rules, words=words)
+        self.assertEqual(out["summary"]["flagged"], 0, [c["listen"] for c in out["cues"]])
+
     def test_ai_change_put_back_when_original_and_audio_agree(self):
         words = timed("thank you bhai")
         tokens = captions.make_tokens(words)
@@ -229,19 +253,38 @@ class AutoFix(Base):
         self.assertNotIn("orig", out["tokens"][2])
         self.assertNotIn("ai", cue)
 
+    def test_ai_typo_put_back_when_the_audio_says_the_original(self):
+        """A swapped-letter change still sounds alike, but the audio says exactly the original."""
+        words = timed("for twelve years")
+        tokens = captions.make_tokens(words)
+        tokens[2] = {**tokens[2], "orig": "years", "text": "yeasr"}
+        FakeEar.HEARD = heard("for twelve years")
+        cue = self.check("", words=words, tokens=tokens)["cues"][0]
+        self.assertEqual(cue["text"], "for 12 years")
+        self.assertEqual(cue["listen"]["status"], "fixed")
+
+    def test_ai_case_change_is_kept(self):
+        words = timed("meet aditi today")
+        tokens = captions.make_tokens(words)
+        tokens[1] = {**tokens[1], "orig": "aditi", "text": "Aditi"}
+        FakeEar.HEARD = heard("meet aditi today")
+        cue = self.check("", words=words, tokens=tokens)["cues"][0]
+        self.assertEqual((cue["text"], cue["listen"]["status"]), ("meet Aditi today", "ok"))
+
     def test_users_own_word_is_never_changed(self):
         FakeEar.HEARD = heard("I went to the store")
         out = self.check("I went to the shop")
         self.assertEqual(out["cues"][0]["text"], "I went to the shop")
         self.assertEqual(out["cues"][0]["listen"]["status"], "flag")
 
-    def test_ai_unsure_cleared_when_heard(self):
+    def test_ai_unsure_is_left_for_the_user(self):
+        """Hearing a word can't confirm its spelling ("Aditi" / "Aditee"): the AI's [?] stays."""
         words = timed("meet Aditi today")
         tokens = captions.make_tokens(words)
         tokens[1] = {**tokens[1], "unsure": True}
         FakeEar.HEARD = heard("meet Aditi today")
         out = self.check("", words=words, tokens=tokens)
-        self.assertNotIn("unsure", out["cues"][0])
+        self.assertEqual(out["cues"][0]["unsure"], [1])
 
     def test_window_heard_once_and_kept_for_a_switch(self):
         FakeEar.HEARD = heard("I love you so much")
@@ -254,6 +297,41 @@ class AutoFix(Base):
         out = lc.run(ctx, tokens, words, captions.build_cues(tokens, words, rules), rules)
         self.assertEqual(out["summary"]["calls"], 0)  # nothing re-heard
         self.assertEqual(out["summary"]["ok"], 5)
+
+
+class Packing(unittest.TestCase):
+    def test_clips_packed_and_mapped_back(self):
+        """Per-caption clips go to Whisper together, 1 s of silence apart; each heard word comes
+        back to its own clip, at its real time."""
+        import numpy as np
+        ear = object.__new__(lc.Ear)
+        ear.audio, ear.duration = np.zeros(60 * lc.SR, dtype=np.float32), 60.0
+        calls = []
+
+        def hear(t0, t1):  # Whisper on the packed buffer: one word in the middle of each clip
+            calls.append(len(ear.audio) / lc.SR)
+            return [{"word": "a", "start": 0.9, "end": 1.1, "prob": 1.0},     # clip 1: 0-2 s
+                    {"word": "b", "start": 3.4, "end": 3.6, "prob": 1.0}]     # clip 2: 3-5 s
+        ear.hear = hear
+        out = ear.hear_many([(10.0, 12.0), (40.0, 42.0)])
+        self.assertEqual(len(calls), 1)
+        self.assertAlmostEqual(calls[0], 5.0)  # 2 s + 1 s gap + 2 s
+        self.assertEqual([(w["word"], w["start"]) for w in out[0]], [("a", 10.9)])
+        self.assertEqual([(w["word"], w["start"]) for w in out[1]], [("b", 40.4)])
+        self.assertEqual(ear.duration, 60.0)  # restored
+
+    def test_packs_split_at_the_limit(self):
+        import numpy as np
+        ear = object.__new__(lc.Ear)
+        ear.audio, ear.duration = np.zeros(200 * lc.SR, dtype=np.float32), 200.0
+        calls = []
+        ear.hear = lambda t0, t1: calls.append(1) or []
+        ear.hear_many([(t, t + 5.0) for t in range(0, 100, 10)])  # 10 clips of 5 s
+        self.assertEqual(len(calls), 3)  # 4 per pack (5+1+5+1+5+1+5 = 23 s): 4+4+2, not 10 calls
+
+    def test_spelling_variants_agree(self):
+        for a, b in (("fir", "phir"), ("woh", "vah"), ("husde", "hansate")):
+            self.assertGreaterEqual(lc.similarity(a, b), lc.DIFFER, (a, b))
 
 
 class Windows(unittest.TestCase):

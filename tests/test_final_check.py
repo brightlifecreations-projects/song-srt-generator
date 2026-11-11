@@ -164,7 +164,7 @@ class FinalCheck(unittest.TestCase):
     def test_editorial_prompt(self):
         _, fake = self.run_check({"tokens": [], "cue_starts": [0], "unsure": []})
         system, sent, _ = fake.sent
-        for rule in ("Misheard", "proper nouns", "digits", "7:30", "symbol", "4-5 words", "one speaker",
+        for rule in ("Misheard", "proper nouns", "digits", "1st", "symbol", "4-5 words", "one speaker",
                      "[?]", "NEVER add, remove"):
             self.assertIn(rule, system)
         self.assertIn("no one", sent["number_exceptions"])

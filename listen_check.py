@@ -36,7 +36,7 @@ import captions
 import config
 
 PAD = 0.5            # seconds of audio either side of a caption, in windows and per-caption clips
-WINDOW_MAX = 24.0    # windows of whole captions up to this long (Whisper's own window is 30 s)
+WINDOW_MAX = 28.0    # windows of whole captions up to this long (Whisper hears 30 s at a time)
 EARLY = 0.2          # a caption may start this much before its first word…
 LATE = 0.3           # …and end this much after its last
 OFF = 0.5            # the re-listen and the caption must disagree by more than this on timing
@@ -44,12 +44,16 @@ SEARCH = 1.5         # heard words this far either side of a caption are compare
                      # semi-global match picks its own), so a caption timed 1 s off is still found
 REALIGN_AGREE = 0.3  # the re-alignment must land this close to where the words were heard
 AGREE = 0.6          # word similarity at or above which the caption word and the heard word agree
+DIFFER = 0.45        # …and below which they're different words (between: a variant, "husde" / "hansate")
 SURE = 0.5           # a heard word is evidence only at this probability or above
 GAP = 0.85           # alignment cost of a caption word that wasn't heard (a heard word that's at
                      # all like it, similarity above 0.15, is taken as what was heard instead)
 GAP_HEARD = 0.5      # …and of an extra heard word inside the caption
-CONFIRM_MAX = 60     # per-caption re-listens per check (a long song in Word by word could ask for
+CONFIRM_MAX = 120    # per-caption re-listens per check (a long song in Word by word could ask for
                      # hundreds; beyond this, the window pass alone decides)
+PACK_MAX = 28.0      # per-caption clips are packed, 1 s of silence apart, into one Whisper call of up
+PACK_GAP = 1.0       # to this long: a 4 s clip costs Whisper almost as much as 30 s (measured 4.4 s
+                     # vs 9.1 s), so packing makes the confirmations ~6x cheaper
 SR = 16000
 
 
@@ -61,15 +65,33 @@ def _key(text: str) -> str:
     return re.sub(r"[\W_]", "", captions.clean_caption(text).casefold())
 
 
+# A number word on its own is the same as its digits, whatever the context ("ab do parts" = "ab 2
+# parts"; the caption rules only convert "do" before a count word, the AI may convert it anyway).
+_NUMBER_WORDS = {**{w: str(v) for w, v in captions._UNITS.items()}, **{w: str(v) for w, v in captions._TENS.items()},
+                 **{w: str(v) for w, v in captions._HINGLISH.items()}, "tin": "3", "teen": "3",
+                 **{w: f"{captions._UNITS.get(c, captions._TENS.get(c, 0))}" for w, c in captions._ORDINALS.items()
+                    if c in captions._UNITS or c in captions._TENS}}
+
+
+def _as_number(key: str) -> str:
+    if key.isdigit():
+        return key
+    m = re.fullmatch(r"(\d+)(st|nd|rd|th)", key)
+    return m.group(1) if m else _NUMBER_WORDS.get(key, key)
+
+
 def similarity(a: str, b: str) -> float:
     """0–1 for two keys. Numbers must match exactly; Roman letters by spelling or sound (Hinglish
     spellings vary: "zaroor" / "jaroor"); other scripts by spelling."""
+    a, b = _as_number(a), _as_number(b)
     if a == b:
         return 1.0
     if not a or not b or any(ch.isdigit() for ch in a + b):
         return 0.0
     if a.isascii() and b.isascii():
         import hinglish
+        if hinglish.skeleton(a) and hinglish.skeleton(a) == hinglish.skeleton(b):
+            return 1.0  # the same sounds, spelt differently: "fir" / "phir", "woh" / "vah"
         return hinglish.similarity(a, b)
     return difflib.SequenceMatcher(a=a, b=b).ratio()
 
@@ -144,7 +166,7 @@ def judge(caption_words: list[str], heard: list[dict]) -> list[dict]:
             out.append({"word": word, "state": "unheard", "heard": "", "prob": 0.0})
             continue
         hs = [heard[k] for k in idx]
-        out.append({"word": word, "state": "agree" if sim >= AGREE else "differ",
+        out.append({"word": word, "state": "agree" if sim >= AGREE else "close" if sim >= DIFFER else "differ",
                     "heard": " ".join(h["text"] for h in hs), "prob": min(h["prob"] for h in hs),
                     "start": hs[0]["start"], "end": hs[-1]["end"]})
     return out
@@ -287,6 +309,49 @@ class Ear:
                 w["word"] = transliterate.to_hinglish(w["word"]).strip() or w["word"]
         return out
 
+    def hear_many(self, spans: list[tuple[float, float]]) -> list[list[dict]]:
+        """Several clips heard on their own, packed into as few Whisper calls as possible: each clip
+        is separated from the next by PACK_GAP of silence, and the words are mapped back by offset."""
+        import numpy as np
+
+        out: list[list[dict]] = [[] for _ in spans]
+        packs, cur, length = [], [], 0.0
+        for n, (t0, t1) in enumerate(spans):
+            t0, t1 = max(0.0, t0), min(self.duration, t1)
+            size = t1 - t0 + (PACK_GAP if cur else 0.0)
+            if cur and length + size > PACK_MAX:
+                packs.append(cur)
+                cur, length, size = [], 0.0, t1 - t0
+            cur.append((n, t0, t1))
+            length += size
+        if cur:
+            packs.append(cur)
+        gap = np.zeros(int(PACK_GAP * SR), dtype=self.audio.dtype)
+        for pack in packs:
+            pieces, where, pos = [], [], 0.0
+            for n, t0, t1 in pack:
+                if pieces:
+                    pieces.append(gap)
+                    pos += PACK_GAP
+                clip = self.audio[int(t0 * SR):int(t1 * SR)]
+                pieces.append(clip)
+                where.append((n, t0, pos, pos + len(clip) / SR))
+                pos += len(clip) / SR
+            saved = self.audio, self.duration
+            self.audio = np.concatenate(pieces)
+            self.duration = len(self.audio) / SR
+            try:
+                heard = self.hear(0.0, self.duration)
+            finally:
+                self.audio, self.duration = saved
+            for w in heard:
+                mid = (w["start"] + w["end"]) / 2
+                for n, t0, a, b in where:
+                    if a - 0.2 <= mid <= b + 0.2:
+                        out[n].append({**w, "start": round(w["start"] - a + t0, 3), "end": round(w["end"] - a + t0, 3)})
+                        break
+        return out
+
     def realign(self, t0: float, t1: float, text: str) -> list[tuple[float, float]] | None:
         """Forced alignment of `text` on t0–t1: [(start, end)] per word, or None."""
         import pipeline
@@ -343,6 +408,16 @@ def _positions(cue: dict, tokens: list[dict]) -> list[int]:
     for k in cue["tokens"]:
         out += [k] * len(captions.clean_caption(tokens[k]["text"]).split())
     return out
+
+
+def _put_back(token: dict, judged: dict) -> bool:
+    """Did the re-listen hear exactly the word the AI changed (and not the AI's version)?"""
+    orig = token.get("orig")
+    if orig is None or len(captions.clean_caption(orig).split()) != 1 or judged["state"] == "unheard" \
+            or judged["prob"] < SURE:
+        return False
+    heard = _key(judged["heard"])
+    return heard == _key(orig) and _as_number(heard) != _as_number(_key(token["text"]))
 
 
 def run(ctx: dict, tokens: list[dict], words: list[dict], cues: list[dict], rules: dict,
@@ -404,48 +479,58 @@ def _run(ctx, tokens, words, cues, rules, report, hearing, summary) -> dict:
     words = [dict(w) for w in words]
     tokens = [dict(t) for t in tokens]
     verdicts = {}
-    confirms = 0
     changed = False
-    for ci, cue in enumerate(cues):
+    # The window pass, caption by caption.
+    first = []
+    for cue in cues:
         cap = cue["text"].split()
         near = [h for h in heard_all if cue["start"] - SEARCH <= (h["start"] + h["end"]) / 2 <= cue["end"] + SEARCH]
         judged = judge(cap, near)
-        issues = text_issues(judged, rules.get("language"))
-        confirm = None
-        if issues and confirms < CONFIRM_MAX:  # 2. hear this caption on its own before saying so
-            key = f"{cue['start'] - PAD:.2f}-{cue['end'] + PAD:.2f}"
-            if key not in cache["clips"]:
-                cache["clips"][key] = ear.hear(cue["start"] - PAD, cue["end"] + PAD)
-                confirms += 1
-            confirm = judge(cap, heard_tokens(cache["clips"][key], numbers_language))
-            issues = [k for k in issues if k in text_issues(confirm, rules.get("language"))]
         positions = _positions(cue, tokens)
+        # Words the final AI check changed that the audio says as they were (exactly the original,
+        # not the AI's text): a typo-like change ("years" -> "yeasr") still sounds alike, so it
+        # wouldn't count as heard differently.
+        back = [k for k in range(len(judged)) if k < len(positions) and _put_back(tokens[positions[k]], judged[k])]
+        first.append((cap, near, judged, positions, text_issues(judged, rules.get("language")), back))
+    # 2. A caption the window pass heard differently is heard again on its own clip (packed).
+    doubtful = [ci for ci, f in enumerate(first) if f[4] or f[5]][:CONFIRM_MAX]
+    clip_key = lambda c: f"{c['start'] - PAD:.2f}-{c['end'] + PAD:.2f}"  # noqa: E731
+    todo = [ci for ci in doubtful if clip_key(cues[ci]) not in cache["clips"]]
+    if todo:
+        report("listen", f"Listening check — hearing {len(todo)} caption(s) again on their own…")
+        for ci, got in zip(todo, ear.hear_many([(cues[ci]["start"] - PAD, cues[ci]["end"] + PAD) for ci in todo])):
+            cache["clips"][clip_key(cues[ci])] = got
+    confirms = len(todo)
+    for ci, cue in enumerate(cues):
+        cap, near, judged, positions, issues, back = first[ci]
+        confirm = None
+        if ci in doubtful:
+            confirm = judge(cap, heard_tokens(cache["clips"][clip_key(cue)], numbers_language))
+            issues = [k for k in issues if k in text_issues(confirm, rules.get("language"))]
+            back = [k for k in back if _put_back(tokens[positions[k]], confirm[k])]
         fixes, reasons = [], []
-        # The final AI check's [?]: cleared when the re-listen clearly heard that very word.
-        for k, j in enumerate(judged):
-            if j["state"] == "agree" and j["prob"] >= SURE and k < len(positions) and tokens[positions[k]].get("unsure"):
-                tokens[positions[k]].pop("unsure")
-                changed = True
-        for k in issues:
+        for k in sorted(set(issues) | set(back)):
             j = judged[k]
             heard_text = (confirm[k]["heard"] if confirm and confirm[k]["heard"] else j["heard"])
             tok = tokens[positions[k]] if k < len(positions) else None
             orig = tok.get("orig") if tok else None
-            if orig is not None and len(captions.clean_caption(orig).split()) == 1:
-                ok = [similarity(_key(orig), _key(x["heard"])) >= AGREE for x in (j, confirm[k] if confirm else j)]
-                if all(ok):  # the original word and the re-listen agree: the AI's change goes
-                    fixes.append(f"put back ‘{captions.clean_caption(orig)}’ (the AI had changed it to "
-                                 f"‘{j['word']}’; heard ‘{heard_text}’)")
-                    tok["text"] = orig
-                    del tok["orig"]
-                    changed = True
-                    continue
+            if k in back or orig is not None and len(captions.clean_caption(orig).split()) == 1 and all(
+                    similarity(_key(orig), _key(x["heard"])) >= AGREE for x in (j, confirm[k] if confirm else j)):
+                # the original word and the re-listen agree: the AI's change goes
+                fixes.append(f"put back ‘{captions.clean_caption(orig)}’ (the AI had changed it to "
+                             f"‘{j['word']}’; heard ‘{heard_text}’)")
+                tok["text"] = orig
+                del tok["orig"]
+                changed = True
+                continue
             if j["state"] == "unheard":
                 reasons.append(f"nothing heard for ‘{' '.join(cap)}’ here")
                 break
             reasons.append(f"heard ‘{heard_text}’, caption says ‘{j['word']}’")
         # 3. Timing against the re-listen; re-aligned when two sources agree.
         start, end = heard_timing(cue, judged)
+        if len(cap) == 1 and sum(h["key"] == _key(cap[0]) for h in near) > 1:
+            start = end = None  # "for" heard twice nearby: which one is this caption's can't be told
         off = timing_off(cue, start, end)
         if off:
             w0 = tokens[cue["tokens"][0]]["w0"]

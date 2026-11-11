@@ -132,6 +132,7 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
     return next;
   }), i);
   const looksRight = i => update(i, { listen: { ...cues[i].listen, resolved: true } });
+  const dropUnsure = (i, k) => update(i, { unsure: (cues[i].unsure || []).filter(x => x !== k) });
   /** Jump to a cue a little before it starts, and play (the listening check's Listen button). */
   function listen(i) {
     setSel(i);
@@ -286,7 +287,8 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
       const change = ai.find(a => a.i === k);
       const gap = k < words.length - 1 ? " " : "";
       const mark = unsure.includes(k)
-        ? <span className="unsure-mark" data-testid="unsure" title="The AI check wasn't sure of this word">[?]</span> : null;
+        ? <button className="unsure-mark" data-testid="unsure" onClick={e => { e.stopPropagation(); dropUnsure(i, k); }}
+            title="The AI check wasn't sure of this word. Click if it's right (or edit it).">[?]</button> : null;
       if (!change) return <span key={k}>{w}{mark}{gap}</span>;
       return (
         <span key={k}>
@@ -306,6 +308,7 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
   const heardAny = cues.some(c => c.listen);
   const toCheck = cues.filter(flagged).length;
   const fixedCount = cues.filter(c => c.listen?.status === "fixed").length;
+  const unsureCount = cues.reduce((n, c) => n + (c.unsure || []).length, 0);
   const okCount = cues.filter(c => c.listen && !flagged(c) && c.listen.status !== "fixed").length;
   const nextToCheck = () => {
     const after = cues.findIndex((c, k) => k > sel && flagged(c));
@@ -439,8 +442,13 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
           </span>
           {toCheck > 0
             ? <button className="loadtxt" onClick={nextToCheck} data-testid="listen-next">Next to check</button>
-            : <span className="verified-badge" data-testid="verified">Verified</span>}
+            : !unsureCount && <span className="verified-badge" data-testid="verified">Verified</span>}
         </div>
+      )}
+      {unsureCount > 0 && (
+        <p className="stage-note listen-unsure" data-testid="unsure-count">
+          {unsureCount === 1 ? "1 word" : `${unsureCount} words`} marked [?]: the AI check wasn't sure. Click a [?] once the word is right.
+        </p>
       )}
       {!heardAny && listenSummary?.skipped && (
         <p className="stage-note muted" data-testid="listen-skipped">Listening check skipped — {listenSummary.skipped}.</p>
@@ -450,7 +458,7 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
         <a className="dl-primary" href={`/api/jobs/${jobId}/srt`} onClick={download} data-testid="dl-srt">
           <span>
             <b>Download SRT {edited && <span className="edited-badge" data-testid="edited-badge">Edited</span>}
-              {heardAny && !toCheck && <span className="edited-badge verified" data-testid="verified-badge">Verified</span>}</b>
+              {heardAny && !toCheck && !unsureCount && <span className="edited-badge verified" data-testid="verified-badge">Verified</span>}</b>
             <span>{srtName} · {cues.length} cues · {captionMode === "word" ? "word by word" : "line by line"}</span>
           </span>
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"><path d="M8 2v9M4.5 7.5 8 11l3.5-3.5" /><path d="M2.5 13.5h11" /></svg>
