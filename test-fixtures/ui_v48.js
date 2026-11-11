@@ -1,5 +1,7 @@
 // v4.8 end-to-end UI checks (Mac: ui_check.py; Windows: ui_edge.py; files, in order:
-//   sample/clip.wav, drama.mp4, a reel video with a Hindi file name and music, hinglish.mp3).
+//   sample/clip.wav, drama.mp4, a reel video with a Hindi file name and music, hinglish.mp3, and for
+//   the 4.8.1 follow-playback checks long-reel.mp4, long-drama.mp4, long-song.wav, long-script.txt;
+//   test-fixtures/make_ui_media_mac.sh makes all of them on a Mac).
 // The v4.6 suite, plus: the listening check (its step, the summary, "Check this" flags with a reason,
 // Listen and Looks right, Verified), clean-caption symbols (generated and typed), numbers as digits
 // (ordinals, times, "1 inch"), the AI check's [?] marks and a change the listening check put back.
@@ -23,7 +25,7 @@ const drop = f => {
 };
 const pickMode = label => $$(".mode", ws()).find(b => b.textContent.includes(label)).click();
 const goBtn = () => ws().querySelector("button.go");
-const [song, dramaVideo, reelVideo, hinglishAudio] = files;
+const [song, dramaVideo, reelVideo, hinglishAudio, longReel, longDrama, longSong, longScriptFile] = files;
 const MOCK = window.__mock;
 const timing = {};
 const t0 = () => performance.now();
@@ -350,6 +352,133 @@ if (MOCK) {
     await compareDownload(`AI check ${mode}`);
   }
   await fetch("/api/ai", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ final_check: false, custom_base_url: "" , provider: "anthropic"}) });
+}
+
+
+// ---------------------------------------------------------------- 4.8.1: follow playback never moves the page
+// The page, the right column and the player must stay exactly where they are while the list follows
+// the playing cue: in every section, video and audio (waveform), light and dark, wide and stacked.
+if (longReel && longScriptFile) {
+  const LONG = await longScriptFile.text();
+  const pageTop = () => (document.scrollingElement || document.documentElement).scrollTop;
+  const stagecol = () => ws().querySelector(".stagecol");
+  const list = () => ws().querySelector("[data-testid=review-list]");
+  const playerCard = () => stagecol().querySelector(".wavecard");
+  const media = () => stagecol().querySelector("video");
+  const playingRow = () => rows().findIndex(r => r.classList.contains("playing"));
+  const inList = i => { const l = list().getBoundingClientRect(), r = rows()[i]?.getBoundingClientRect();
+                        return r && r.top >= l.top - 1 && r.bottom <= l.bottom + 1; };
+  const together = () => { const l = list().getBoundingClientRect(), c = stagecol().getBoundingClientRect();
+    return onScreen(playerCard()) && l.top >= 0 && Math.min(l.bottom, window.innerHeight) - l.top >= 150 && c.bottom <= window.innerHeight + 1; };
+  const geometry = () => JSON.stringify({ player: playerCard().getBoundingClientRect().bottom, listTop: list().getBoundingClientRect().top,
+    listH: list().clientHeight, col: stagecol().getBoundingClientRect().bottom, win: window.innerHeight });
+  const onScreen = el => { const r = el.getBoundingClientRect(); return r.top >= -1 && r.bottom <= window.innerHeight + 1 && r.height > 0; };
+  const playBtn = () => ws().querySelector(".review-transport .playbtn");
+  const isPlaying = () => playBtn().getAttribute("aria-label") === "Pause";
+  async function stop() { if (isPlaying()) { playBtn().click(); await sleep(200); } }
+  async function generate(page, file) {
+    await navTo(page);
+    pickMode("Transcribe for me"); await sleep(150); pickMode("I have the"); await sleep(200);
+    drop(file); await until(() => ws().querySelector(".filechip-name"), 5000, "long file");
+    setVal(ws().querySelector("textarea.lyrics"), LONG); await sleep(100);
+    const before = ws().querySelector("[data-testid=review]");
+    goBtn().click();
+    await until(() => { const r = ws().querySelector("[data-testid=review]"); return r && r !== before && rows().length && !ws().querySelector(".proc"); }, 900000, page + " long job");
+    await sleep(500);
+  }
+  /** Play (sped up for a video) and sample: nothing but the list may move. */
+  async function watch(label, { seconds, rate = 4, toEnd = false }) {
+    const fixed = { page: pageTop(), col: stagecol().scrollTop, player: Math.round(playerCard().getBoundingClientRect().top) };
+    const startTop = list().scrollTop;
+    if (media()) media().playbackRate = rate;
+    if (!isPlaying()) playBtn().click();
+    let moved = [], missed = 0, samples = 0, maxTop = startTop;
+    const t = performance.now();
+    while (performance.now() - t < seconds * 1000) {
+      await sleep(250);
+      samples++;
+      const now = { page: pageTop(), col: stagecol().scrollTop, player: Math.round(playerCard().getBoundingClientRect().top) };
+      if (now.page !== fixed.page || now.col !== fixed.col || Math.abs(now.player - fixed.player) > 1) moved.push(now);
+      const k = playingRow();
+      if (k >= 0 && !inList(k)) missed++;
+      maxTop = Math.max(maxTop, list().scrollTop);
+      if (toEnd && media() && media().ended) break;
+    }
+    await stop();
+    if (media()) media().playbackRate = 1;
+    check(`${label}: the page, the column and the player never moved (${samples} samples)`, !moved.length, JSON.stringify(moved.slice(0, 3)));
+    check(`${label}: the list followed playback`, maxTop > startTop + 100 && missed <= 2, `list ${startTop}→${maxTop}, playing cue out of view ${missed}×`);
+    return { maxTop };
+  }
+
+  // Reels: a 2-minute vertical video, ~90 captions, light theme, wide window, played to the end.
+  let t1 = t0();
+  await generate("Reels / YouTube", longReel);
+  timing.long_reel_job_s = secs(t1);
+  check("Follow (Reels video): the list overflows and has its own scroll area", list().scrollHeight > list().clientHeight * 2,
+    `${rows().length} cues, list ${list().clientHeight}px of ${list().scrollHeight}px`);
+  check("Follow (Reels video): preview and list on screen together", together(), geometry());
+  check("Follow playback toggle on by default", ws().querySelector("[data-testid=follow]").checked);
+  await watch("Follow (Reels video, light, start to end)", { seconds: 45, toEnd: true });
+  check("Follow (Reels video): played to the end", media().ended || media().currentTime > media().duration - 1, `${media().currentTime}/${media().duration}`);
+  await snap("follow-reels");
+  // A cue clicked far down the list: the video jumps there, nothing else moves.
+  const pageBefore = pageTop(), playerBefore = Math.round(playerCard().getBoundingClientRect().top);
+  list().scrollTop = list().scrollHeight; await sleep(300);
+  const last = rows().length - 2;
+  rows()[last].click(); await sleep(500);
+  const want = shown()[last][0] / 1000;
+  check("Click a cue: the video jumps to it, the page doesn't move", Math.abs(media().currentTime - want) < 0.6 && pageTop() === pageBefore
+    && Math.abs(Math.round(playerCard().getBoundingClientRect().top) - playerBefore) <= 1, `${media().currentTime} vs ${want}`);
+  await stop();
+  // Scrolling the list yourself pauses following for about 3 s.
+  rows()[0].click(); await sleep(400); await stop();
+  media().playbackRate = 4; playBtn().click(); await sleep(1500);
+  list().scrollTop = 0; await sleep(80);
+  let held = true; const ts = performance.now();
+  while (performance.now() - ts < 2300) { await sleep(150); if (list().scrollTop !== 0) held = false; }
+  let resumed = false; const tr = performance.now();
+  while (performance.now() - tr < 4000) { await sleep(150); if (list().scrollTop > 0) { resumed = true; break; } }
+  await stop(); media().playbackRate = 1;
+  check("Follow: paused for ~3 s after you scroll the list, then resumes", held && resumed, `held ${held}, resumed ${resumed}`);
+  // Switched off: the list stays where it is.
+  ws().querySelector("[data-testid=follow]").click(); await sleep(200);
+  list().scrollTop = 0; await sleep(100);
+  media().playbackRate = 4; playBtn().click(); await sleep(4000); await stop(); media().playbackRate = 1;
+  check("Follow playback off: the list doesn't move", list().scrollTop === 0 && !ws().querySelector("[data-testid=follow]").checked);
+  ws().querySelector("[data-testid=follow]").click(); await sleep(300);
+  check("Follow playback back on: jumps to the playing cue", playingRow() < 0 || inList(playingRow()));
+  // While a cue is being edited, the list doesn't follow.
+  rows()[0].click(); await sleep(300); await stop();
+  key("Enter"); await until(() => ws().querySelector(".rcue.on input"), 3000, "edit box");
+  const editTop = list().scrollTop, pageEdit = pageTop();
+  media().playbackRate = 4; playBtn().click(); await sleep(4000); await stop(); media().playbackRate = 1;
+  check("Editing a cue: the list doesn't follow, the page doesn't move", list().scrollTop === editTop && pageTop() === pageEdit
+    && !!ws().querySelector(".rcue.on input"), `${editTop} → ${list().scrollTop}`);
+  key("Escape", ws().querySelector(".rcue.on input")); await sleep(200);
+
+  // Song: the same audio with the waveform, dark theme, 25 s at normal speed.
+  const themeBtn = () => $$("button").find(b => /^(Dark|Light) mode$/.test(b.textContent.trim()));
+  if (document.documentElement.getAttribute("data-theme") !== "dark") { themeBtn().click(); await sleep(400); }
+  check("Dark mode on", document.documentElement.getAttribute("data-theme") === "dark");
+  await generate("Song", longSong);
+  check("Follow (Song waveform): no video, the waveform is the player", !media() && !!stagecol().querySelector("canvas, wave, div[part], .wave-holder"));
+  check("Follow (Song waveform): preview and list on screen together", together(), geometry());
+  await watch("Follow (Song waveform, dark)", { seconds: 25, rate: 1 });
+  await snap("follow-song-dark");
+  themeBtn().click(); await sleep(400);
+
+  // Drama: a horizontal video in a narrow window, columns stacked.
+  await resize(760, 900);
+  await generate("Drama", longDrama);
+  const stacked = getComputedStyle(ws().querySelector(".workbench")).gridTemplateColumns.split(" ").length === 1;
+  check("Narrow window: the columns stack", stacked, getComputedStyle(ws().querySelector(".workbench")).gridTemplateColumns);
+  window.scrollTo(0, stagecol().getBoundingClientRect().top + pageTop()); await sleep(400);  // the user scrolls down to the review
+  check("Stacked: preview and list on screen together", together(), geometry());
+  await watch("Follow (Drama video, stacked)", { seconds: 15 });
+  await snap("follow-drama-narrow");
+  await resize(1440, 960);
+  window.scrollTo(0, 0); await sleep(300);
 }
 
 // ---------------------------------------------------------------- Corrections, number exceptions
