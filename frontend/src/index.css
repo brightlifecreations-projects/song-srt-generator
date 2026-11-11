@@ -1152,3 +1152,35 @@ textarea.lyrics::placeholder { color: var(--muted); }
   background: var(--panel); border: 1px solid var(--line-strong); border-radius: 8px; padding: 10px 12px;
   margin-top: 10px; resize: vertical;
 }
+
+/* ---- V4.8.1: while reviewing, the player stays pinned at the top of the right column and only the
+   subtitle list scrolls (the list's own scrollTop; playback never scrolls the page or the column).
+   The column is exactly as tall as the window below its top (--col-h, set by Workspace.jsx), the
+   video gets what's left after the panel's controls and about 200 px of list, and the list takes
+   the rest, so preview and list are on screen together at any window size. Only in a very short
+   window does the rest of the panel (summary, download) scroll, inside the column. ---- */
+.stagecol.reviewing { height: var(--col-h, calc(100vh - 40px)); max-height: none; overflow: hidden;
+  display: flex; flex-direction: column; padding-bottom: 0; }
+.stagecol.reviewing > .results { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  margin-top: 14px; gap: 12px; }
+.stagecol.reviewing .review { flex: 1 1 auto; min-height: 0; gap: 10px; }
+.stagecol.reviewing .review > * { flex-shrink: 0; }
+.stagecol.reviewing .review > .cuecard { flex: 1 1 auto; min-height: 190px; display: flex; flex-direction: column; }
+.stagecol.reviewing .review-list { flex: 1 1 auto; min-height: 0; max-height: none; }
+.stagecol.reviewing .review-mode { margin: 0; }
+/* The window height left after the panel's fixed parts (~530 px) is shared: 55 % to the video, the
+   rest to the list (a 900-px window: ~165 px of video and ~200 px of list; 1200 px: ~330 and ~300). */
+.stagecol.reviewing .video-frame video { max-height: clamp(150px, calc((var(--col-h, 100vh) - 530px) * 0.55), 460px); }
+.stagecol.reviewing .videocard .player-row { display: none; }  /* the file's name is in the left column */
+.review-list { overscroll-behavior: contain; }
+@media (max-width: 900px) {
+  /* Columns stacked: the review column is one screen tall, so preview and list fit together. */
+  .stagecol.reviewing { position: sticky; top: 0; height: calc(100vh - 16px); height: calc(100dvh - 16px); padding-top: 8px; }
+  .stagecol.reviewing .video-frame video { max-height: clamp(150px, calc((100dvh - 546px) * 0.55), 460px); }
+}
+.stagecol.reviewing .cuecard-head { padding: 10px 18px 8px; }
+.stagecol.reviewing .listen-summary { padding: 6px 12px; font-size: 12.5px; flex-wrap: nowrap; }
+.stagecol.reviewing .listen-summary > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stagecol.reviewing .dl-primary { padding: 12px 18px; }
+.stagecol.reviewing .dl-secondary { padding: 7px 14px; }
+.stagecol.reviewing .video-frame { min-height: 0; }

@@ -641,6 +641,27 @@ export default function Workspace({ section, preset, meta, active }) {
   const aiLive = live.filter(m => m.kind === "ai" || m.kind === "ai-unsure").length;
   const autoLive = live.filter(m => m.kind === "auto").length;
   const steps = job?.steps || DEFAULT_STEPS;
+
+  // V4.8.1: while reviewing, the right column is exactly as tall as the window below its top, so the
+  // player and the subtitle list are both on screen (CSS can't know where the column starts: the page
+  // title is above it until the page scrolls and the column sticks). Stacked columns use CSS alone.
+  const stageRef = useRef(null);
+  useEffect(() => {
+    const col = stageRef.current;
+    if (phase !== "done" || !col) return;
+    const fit = () => {
+      const top = Math.max(col.getBoundingClientRect().top, 20);
+      col.style.setProperty("--col-h", `${Math.max(360, Math.round(window.innerHeight - top - 16))}px`);
+    };
+    fit();
+    window.addEventListener("resize", fit);
+    window.addEventListener("scroll", fit, { passive: true });
+    return () => {
+      window.removeEventListener("resize", fit);
+      window.removeEventListener("scroll", fit);
+      col.style.removeProperty("--col-h");
+    };
+  }, [phase, active]);
   const stageIdx = job?.stage ? job.stage - 1 : 0;
   const cues = phase === "done" ? reviewCues || job?.edited_cues || job?.cues || [] : [];
   const activeCue = cues.findIndex(c => playTime >= c.start && playTime < c.end);
@@ -935,7 +956,7 @@ export default function Workspace({ section, preset, meta, active }) {
         </div>
 
         {/* ------------------------- output (sticky) ------------------------- */}
-        <div className="stagecol">
+        <div className={`stagecol${phase === "done" ? " reviewing" : ""}`} ref={stageRef}>
           {isVideo ? (
             <VideoPreview ref={playerRef} file={file} fallbackSrc={videoFallback} cues={cues}
               format={format} onTime={setPlayTime} onPlayable={setVideoPlayable}

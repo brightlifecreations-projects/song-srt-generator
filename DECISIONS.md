@@ -498,6 +498,24 @@ Recorded 2026-07-15 from Aman's answers.
   - **Mac feed:** `…/releases/latest/download/appcast.xml` serves 4.6.1, byte-identical to v4.6.1's.
   - **Installed from the published Setup.exe** (same SHA-256 as the local build): the quick setup took 45 s, no downloads. The Updates page's **Check for updates** said "You're up to date (4.7)", mode `winsparkle`. The 72-check UI suite then passed 72/72 inside that installed app's own window.
 
+## V4.8.1 — The video stays in view while the list follows playback (2026-11-12, Mac)
+
+- **Bug** (Aman's screen recording, a Reels transcribe job: 2-minute video, ~120 cues): while the video played, the Review panel scrolled the playing cue into view with `scrollIntoView`, which scrolls every scrollable ancestor. The right column (`.stagecol`, sticky with `overflow-y: auto` since V4.5) and the page moved too, so the video slid up out of view.
+- **Fix:**
+  - Following playback sets only the list's own `scrollTop` (`Review.jsx` `showRow`). `scrollIntoView` is gone, and so is the other caller ("Next to check"). The edit box takes focus with `preventScroll`. ↑/↓ keep the selected row visible the same way.
+  - While reviewing (`.stagecol.reviewing`), the right column is a fixed-height flex column: the player keeps its size at the top, and the panel below it scrolls on its own (only in a very short window). Inside that panel, the subtitle list takes the remaining height and scrolls by itself.
+  - The column's height is the window's height below its top (`--col-h`, measured in `Workspace.jsx` on resize and page scroll), because CSS can't know where the column starts while the page title is above it.
+  - The video gets 55 % of what's left after the panel's fixed parts, between 150 and 460 px. The rest goes to the list: on a 932-px-tall window that's a ~165-px video and a ~200-px list; on a 1200-px window, about 330 and 300.
+  - To make room: the video card's file-name row is hidden while reviewing (the name is in the left column), the listening-check summary fits on one line (the model and its time moved to a tooltip), and the download row is more compact.
+  - With the columns stacked (under 900 px), the review column is one screen tall and sticky, so preview and list fit together once you scroll down to it.
+  - Following pauses while a cue is being edited, and for 3 s after the user scrolls the list. A scroll event counts as the user's when the list isn't where the app last put it; the value is read back after setting it, because the browser rounds it (a first version mistook its own rounded scroll for the user's and paused). **Follow playback** (next to Loop this cue) switches it off; on by default, remembered per browser (`localStorage`, `srt-follow-playback`).
+  - Following keeps the playing cue about a third of the way down the part of the list that's on screen.
+- **Tests:** `ui_v48.js` has a new 4.8.1 block, run on long media made by `test-fixtures/make_ui_media_mac.sh`: the reel script spoken six times over music, 2:02, 90 captions, as a vertical video, a horizontal video and a WAV. In each case the page's scroll position, the column's scroll position and the player's position are sampled every 250 ms during playback and must never change, while the list follows and the playing cue stays inside it.
+  - *Reels:* vertical video, light theme, wide window, played from start to end at 4× speed (123 samples).
+  - *Song:* the waveform, dark theme, 25 s at normal speed.
+  - *Drama:* horizontal video in a 760-px window with the columns stacked, the page first scrolled down to the review by the test (as a person would).
+  - Also checked: preview and at least 150 px of list on screen together, the column inside the window, clicking a cue near the end (the video jumps there and nothing else moves), the 3-s pause after scrolling the list and its resumption, Follow playback off and back on, and no following while editing.
+
 ## V4.8 — Listening check; numbers always digits; clean captions; AI editorial pass (2026-11-11, Mac)
 
 Built, tested and published unattended from Aman's brief ("work fully on your own"); every call made without him is listed under *Decisions made alone* below.

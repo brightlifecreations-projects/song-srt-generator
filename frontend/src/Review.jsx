@@ -16,11 +16,18 @@ import { useEffect, useRef, useState } from "react";
    as an orange "Check this" with the reason, a Listen button (jump there and play) and "Looks right";
    editing a flagged cue's text or timing counts as checked. Words the final AI check wasn't sure of
    (cue.unsure: word positions) carry a [?] (never in the SRT). Above Download: what the check found,
-   and a Verified badge once nothing is left to check. */
+   and a Verified badge once nothing is left to check.
+
+   V4.8.1: following playback scrolls only the subtitle list (its own scrollTop), never the page or
+   the column the player sits in, so the video stays in view. It pauses while a cue is being edited
+   and for FOLLOW_PAUSE_MS after the user scrolls the list; "Follow playback" switches it off. */
 
 import { MIN_CUE, autoFix, cleanCaption, fmt, fmtMs, problems, r3 } from "./reviewFix.js";
 
 const clean = cleanCaption;
+const FOLLOW_PAUSE_MS = 3000;
+const FOLLOW_KEY = "srt-follow-playback";
+const savedFollow = () => { try { return localStorage.getItem(FOLLOW_KEY) !== "off"; } catch { return true; } };
 const flagged = c => c.listen?.status === "flag" && !c.listen.resolved;
 
 /** The AI's changes that are still in the text (the word at that position is the AI's word). */
@@ -41,6 +48,10 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
   const [notice, setNotice] = useState("");      // what an action did (re-time, …)
   const [retiming, setRetiming] = useState(false);
   const rowRefs = useRef([]);
+  const listRef = useRef(null);
+  const [follow, setFollow] = useState(savedFollow);
+  const userScrolled = useRef(0);      // when the user last scrolled the list themselves
+  const ourTop = useRef(null);         // the scrollTop we set last (its scroll event isn't the user's)
   const inputRef = useRef(null);
   const saveTimer = useRef(null);
   const pending = useRef(null);       // cues waiting to be saved
@@ -245,9 +256,44 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
     if (loop && playing && c && time >= c.end - 0.04) player.current?.seek(c.start + 0.01);
   }, [time]);
 
-  // The playing cue scrolls into view (not while typing in another one).
+  /** Bring row i into view by scrolling the list itself (never scrollIntoView, which also scrolls
+      the page and the player's column). "follow": the playing cue sits about a third of the way down. */
+  function showRow(i, how = "nearest") {
+    const list = listRef.current, row = rowRefs.current[i];
+    if (!list || !row) return;
+    const box = list.getBoundingClientRect();
+    // The part of the list actually on screen (in a very short window the panel below the player
+    // scrolls, and the list may run past its bottom).
+    const area = list.closest(".results")?.getBoundingClientRect();
+    const height = Math.max(40, Math.min(list.clientHeight, (area ? area.bottom : innerHeight) - box.top, innerHeight - box.top));
+    const top = row.getBoundingClientRect().top - box.top + list.scrollTop;
+    const bottom = top + row.offsetHeight;
+    let next = list.scrollTop;
+    if (top < list.scrollTop || bottom > list.scrollTop + height) {
+      next = how === "follow" ? top - height / 3 : top < list.scrollTop ? top : bottom - height;
+    }
+    next = Math.max(0, Math.min(Math.round(next), list.scrollHeight - list.clientHeight));
+    if (Math.abs(next - list.scrollTop) < 1) return;
+    list.scrollTop = next;
+    ourTop.current = list.scrollTop;  // as the browser rounded it, so its scroll event isn't taken for the user's
+  }
+  function onListScroll() {
+    const list = listRef.current;
+    if (ourTop.current !== null && Math.abs(list.scrollTop - ourTop.current) <= 2) { ourTop.current = null; return; }
+    ourTop.current = null;
+    userScrolled.current = Date.now();
+  }
+  function toggleFollow(on) {
+    setFollow(on);
+    try { localStorage.setItem(FOLLOW_KEY, on ? "on" : "off"); } catch { /* private window */ }
+    if (on) { userScrolled.current = 0; if (playingIdx >= 0) showRow(playingIdx, "follow"); }
+  }
+
+  // Follow playback: the playing cue stays in view in the list — not while a cue is being edited,
+  // not for a few seconds after the user scrolled the list, and not when switched off.
   useEffect(() => {
-    if (playingIdx >= 0 && !editing) rowRefs.current[playingIdx]?.scrollIntoView({ block: "nearest" });
+    if (playingIdx < 0 || editing || !follow || Date.now() - userScrolled.current < FOLLOW_PAUSE_MS) return;
+    showRow(playingIdx, "follow");
   }, [playingIdx]);
 
   // Space play/pause, ↑/↓ move between cues, Enter edits, Escape stops editing; ⌘Z / ⇧⌘Z undo/redo.
@@ -260,8 +306,8 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
       }
       if (typing) return;
       if (e.key === " ") { e.preventDefault(); player.current?.toggle(); }
-      else if (e.key === "ArrowDown") { e.preventDefault(); go(Math.min(sel + 1, cues.length - 1), false); }
-      else if (e.key === "ArrowUp") { e.preventDefault(); go(Math.max(sel - 1, 0), false); }
+      else if (e.key === "ArrowDown") { e.preventDefault(); const k = Math.min(sel + 1, cues.length - 1); go(k, false); showRow(k); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); const k = Math.max(sel - 1, 0); go(k, false); showRow(k); }
       else if (e.key === "Enter") { e.preventDefault(); setEditing(true); }
     };
     window.addEventListener("keydown", onKey);
@@ -275,7 +321,7 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
   }, [jobId]);
 
   useEffect(() => {
-    if (editing) { applied.current = false; inputRef.current?.focus(); }
+    if (editing) { applied.current = false; inputRef.current?.focus({ preventScroll: true }); showRow(sel); }
   }, [editing, sel]);
 
   function cueText(c, i) {
@@ -313,7 +359,7 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
   const nextToCheck = () => {
     const after = cues.findIndex((c, k) => k > sel && flagged(c));
     const k = after >= 0 ? after : cues.findIndex(flagged);
-    if (k >= 0) { listen(k); rowRefs.current[k]?.scrollIntoView({ block: "nearest" }); }
+    if (k >= 0) { listen(k); showRow(k); }
   };
   const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
@@ -352,6 +398,8 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
       <div className="review-tools">
         <button className="loadtxt" onClick={addAtPlayhead} data-testid="add-cue">+ Cue at playhead</button>
         <label className="check loop"><input type="checkbox" checked={loop} onChange={e => setLoop(e.target.checked)} data-testid="loop" /> Loop this cue</label>
+        <label className="check loop" title="Keep the playing subtitle in view in the list (pauses while you edit or scroll)">
+          <input type="checkbox" checked={follow} onChange={e => toggleFollow(e.target.checked)} data-testid="follow" /> Follow playback</label>
         <span className="spacer" />
         <button className="loadtxt" onClick={undo} disabled={!hist.past.length} data-testid="undo" title="Undo (Ctrl+Z / ⌘Z)">Undo</button>
         <button className="loadtxt" onClick={redo} disabled={!hist.future.length} data-testid="redo" title="Redo (Ctrl+Shift+Z / ⇧⌘Z)">Redo</button>
@@ -372,7 +420,7 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
           <span className="cuecard-title">Subtitles · {cues.length}</span>
           <span className="cuecard-hint">Click to jump · Enter to edit · Space play/pause · ↑↓ move</span>
         </div>
-        <div className="cuelist review-list">
+        <div className="cuelist review-list" ref={listRef} onScroll={onListScroll} data-testid="review-list">
           {cues.map((c, i) => {
             const bad = issues.filter(p => p.i === i);
             const on = i === sel;
@@ -434,11 +482,11 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
       </div>
 
       {heardAny && (
-        <div className={`listen-summary${toCheck ? "" : " clear"}`} data-testid="listen-summary">
+        <div className={`listen-summary${toCheck ? "" : " clear"}`} data-testid="listen-summary"
+          title={listenSummary?.seconds != null ? `Listened with ${listenSummary.model} in ${listenSummary.seconds} s` : undefined}>
           <span>
             Checked against the audio: {plural(okCount, "caption", "captions")} OK, {fixedCount} fixed,{" "}
             {toCheck === 1 ? "1 needs" : `${toCheck} need`} your check
-            {listenSummary?.seconds != null && <span className="muted"> · {listenSummary.model}, {listenSummary.seconds} s</span>}
           </span>
           {toCheck > 0
             ? <button className="loadtxt" onClick={nextToCheck} data-testid="listen-next">Next to check</button>
