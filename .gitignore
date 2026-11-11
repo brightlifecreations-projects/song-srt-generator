@@ -24,3 +24,5 @@ update-settings.json
 number-exceptions.txt
 /SRT Generator.exe
 /wheels/
+# Release reports written for Aman, kept local
+REPORT-*.md
