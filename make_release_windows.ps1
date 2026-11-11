@@ -35,7 +35,7 @@ $Setup = Join-Path $Dist $SetupName
 $Zip = Join-Path $Dist $ZipName
 $Appcast = Join-Path $Dist "appcast-windows.xml"
 $AppFiles = @("app.py", "pipeline.py", "transliterate.py", "corrections.py", "hinglish.py", "hinglish_model.py",
-              "ai_polish.py", "review.py", "captions.py", "final_check.py", "config.py", "warmup.py", "VERSION",
+              "ai_polish.py", "review.py", "captions.py", "final_check.py", "listen_check.py", "config.py", "warmup.py", "VERSION",
               "README.md", "DECISIONS.md", "requirements-windows.txt")
 
 function Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }

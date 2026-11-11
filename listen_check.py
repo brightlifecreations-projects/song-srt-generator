@@ -44,7 +44,8 @@ SEARCH = 1.5         # heard words this far either side of a caption are compare
                      # semi-global match picks its own), so a caption timed 1 s off is still found
 REALIGN_AGREE = 0.3  # the re-alignment must land this close to where the words were heard
 AGREE = 0.6          # word similarity at or above which the caption word and the heard word agree
-DIFFER = 0.45        # …and below which they're different words (between: a variant, "husde" / "hansate")
+DIFFER = 0.45        # Hinglish only: below this they're different words; between, a spelling or sung
+                     # variant ("husde" / "hansate"). Other languages: below AGREE ("older" / "younger" is 0.5)
 SURE = 0.5           # a heard word is evidence only at this probability or above
 GAP = 0.85           # alignment cost of a caption word that wasn't heard (a heard word that's at
                      # all like it, similarity above 0.15, is taken as what was heard instead)
@@ -155,7 +156,7 @@ def heard_tokens(heard: list[dict], language: str | None) -> list[dict]:
     return out
 
 
-def judge(caption_words: list[str], heard: list[dict]) -> list[dict]:
+def judge(caption_words: list[str], heard: list[dict], differ: float = AGREE) -> list[dict]:
     """Each caption word against what was heard around it: {"word", "state": "agree" | "differ" |
     "unheard", "heard": text, "prob", "start", "end"} (heard times when it was heard)."""
     keys = [_key(w) for w in caption_words]
@@ -166,7 +167,7 @@ def judge(caption_words: list[str], heard: list[dict]) -> list[dict]:
             out.append({"word": word, "state": "unheard", "heard": "", "prob": 0.0})
             continue
         hs = [heard[k] for k in idx]
-        out.append({"word": word, "state": "agree" if sim >= AGREE else "close" if sim >= DIFFER else "differ",
+        out.append({"word": word, "state": "agree" if sim >= AGREE else "close" if sim >= differ else "differ",
                     "heard": " ".join(h["text"] for h in hs), "prob": min(h["prob"] for h in hs),
                     "start": hs[0]["start"], "end": hs[-1]["end"]})
     return out
@@ -457,6 +458,7 @@ def _run(ctx, tokens, words, cues, rules, report, hearing, summary) -> dict:
     kind, language = hearing
     log = ctx["log"]
     numbers_language = "hinglish" if kind != "medium" else rules.get("language")
+    differ = DIFFER if kind != "medium" else AGREE
     tl = ctx.setdefault("timeline", {})
     ear = Ear(ctx, kind, language)
     summary["model"] = {"apex": "Hinglish model", "medium": f"Whisper {config.MODEL_SIZE}",
@@ -485,7 +487,7 @@ def _run(ctx, tokens, words, cues, rules, report, hearing, summary) -> dict:
     for cue in cues:
         cap = cue["text"].split()
         near = [h for h in heard_all if cue["start"] - SEARCH <= (h["start"] + h["end"]) / 2 <= cue["end"] + SEARCH]
-        judged = judge(cap, near)
+        judged = judge(cap, near, differ)
         positions = _positions(cue, tokens)
         # Words the final AI check changed that the audio says as they were (exactly the original,
         # not the AI's text): a typo-like change ("years" -> "yeasr") still sounds alike, so it
@@ -505,7 +507,7 @@ def _run(ctx, tokens, words, cues, rules, report, hearing, summary) -> dict:
         cap, near, judged, positions, issues, back = first[ci]
         confirm = None
         if ci in doubtful:
-            confirm = judge(cap, heard_tokens(cache["clips"][clip_key(cue)], numbers_language))
+            confirm = judge(cap, heard_tokens(cache["clips"][clip_key(cue)], numbers_language), differ)
             issues = [k for k in issues if k in text_issues(confirm, rules.get("language"))]
             back = [k for k in back if _put_back(tokens[positions[k]], confirm[k])]
         fixes, reasons = [], []

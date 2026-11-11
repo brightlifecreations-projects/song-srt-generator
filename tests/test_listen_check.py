@@ -329,6 +329,12 @@ class Packing(unittest.TestCase):
         ear.hear_many([(t, t + 5.0) for t in range(0, 100, 10)])  # 10 clips of 5 s
         self.assertEqual(len(calls), 3)  # 4 per pack (5+1+5+1+5+1+5 = 23 s): 4+4+2, not 10 calls
 
+    def test_english_near_words_still_differ(self):
+        judged = lc.judge(["older"], lc.heard_tokens(heard("younger"), "en"))
+        self.assertEqual(judged[0]["state"], "differ")
+        judged = lc.judge(["husde"], lc.heard_tokens(heard("hansate"), "hinglish"), lc.DIFFER)
+        self.assertEqual(judged[0]["state"], "close")
+
     def test_spelling_variants_agree(self):
         for a, b in (("fir", "phir"), ("woh", "vah"), ("husde", "hansate")):
             self.assertGreaterEqual(lc.similarity(a, b), lc.DIFFER, (a, b))

@@ -60,6 +60,8 @@ def main() -> int:
     print(f"\nPASS — {len(result['cues'])} cues written to {result['srt_path'].name}")
     print(f"  vocal isolation: {t['separate_seconds']:.1f}s")
     print(f"  lyric alignment: {t['align_seconds']:.1f}s")
+    if "listen_seconds" in t:
+        print(f"  listening check: {t['listen_seconds']:.1f}s")
     print(f"  job folder:      {result['job_dir']}")
     print("\nSetup complete. Start the app with: python app.py (or the start script).")
     return 0

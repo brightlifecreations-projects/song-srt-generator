@@ -138,7 +138,7 @@ After the captions are built (and after the final AI check), Whisper listens to 
 - **Fixed automatically:** a caption timed away from where its words are heard is re-aligned on its own stretch of audio, when the re-alignment and the re-listen agree; and a word the final AI check changed is put back when the original word and the re-listen agree.
 - **Flagged for you:** anything else — a word heard differently (your own script and approved transcript are never changed by it), words not heard at all, timing it couldn't confirm. Each flag says why.
 
-It's its own step in the progress (*Listening check*) and adds roughly 3–15 seconds per minute of audio (the alignment model is already loaded; see DECISIONS.md V4.8 for measurements). **Download SRT** always gives the fixed version. Switching Line by line / Word by word re-checks from what was already heard, without listening again. Nothing is sent anywhere. A translation (English translation script) isn't compared with the audio.
+It's its own step in the progress (*Listening check*). On an Apple Silicon Mac it took 3 s for a 17-second clip, about 1 minute for a 2-minute Hinglish reel and about 2 minutes for a 3½-minute song (DECISIONS.md V4.8). **Download SRT** always gives the fixed version. Switching Line by line / Word by word re-checks from what was already heard, without listening again. Nothing is sent anywhere. A translation (English translation script) isn't compared with the audio.
 
 ## Final AI check (optional, online)
 
