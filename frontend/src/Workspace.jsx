@@ -16,6 +16,7 @@ const LIVE_LABELS = {
   "Align lyrics": "Aligning lyrics",
   "Align transcript": "Aligning transcript",
   "Build subtitles": "Building subtitles",
+  "Listening check": "Checking every caption against the audio",
 };
 const DEFAULT_STEPS = ["Isolate vocals", "Align lyrics", "Build subtitles"];
 
@@ -1006,7 +1007,9 @@ export default function Workspace({ section, preset, meta, active }) {
                   <svg width="13" height="13" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M2 6.5 4.8 9.2 10 3" /></svg>
                   {job.approximate_timing
                     ? <>Done in {Math.round(totalSeconds)}s — <span className="approx-badge">approximate timing</span> from Whisper's phrases.</>
-                    : <>Done in {Math.round(totalSeconds)}s — every line on its mark.</>}
+                    : job.listen_summary?.flagged
+                      ? <>Done in {Math.round(totalSeconds)}s — {job.listen_summary.flagged === 1 ? "1 caption" : `${job.listen_summary.flagged} captions`} to check below.</>
+                      : <>Done in {Math.round(totalSeconds)}s — every line on its mark.</>}
                   {isolate === "auto" && <span className="music-note">{job.music_detected ? "Music detected and removed" : "No music detected"}</span>}
                 </div>
 
@@ -1026,9 +1029,11 @@ export default function Workspace({ section, preset, meta, active }) {
 
                 <Review key={`${job.id}-${reviewKey}`} jobId={job.id}
                   initialCues={(job.edited_cues || job.cues || []).map(c => ({ start: c.start, end: c.end, text: c.text,
-                                                                               ...(c.ai ? { ai: c.ai } : {}) }))}
+                                                                               ...(c.ai ? { ai: c.ai } : {}),
+                                                                               ...(c.unsure ? { unsure: c.unsure } : {}),
+                                                                               ...(c.listen ? { listen: c.listen } : {}) }))}
                   captionMode={job.caption_mode || capMode} onCaptionMode={switchCaptions} switching={switching}
-                  checkWith={job.check_with}
+                  checkWith={job.check_with} listenSummary={job.listen_summary}
                   edited={!!job.edited} cap={job.max_chars} player={playerRef} time={playTime}
                   duration={duration} playing={playing} active={active} onCues={setReviewCues}
                   srtName={job.srt_name} hasVocals={job.has_vocals}

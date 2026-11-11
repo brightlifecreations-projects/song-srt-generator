@@ -67,7 +67,7 @@ class LineBreaking(unittest.TestCase):
 
     def test_punctuation_ends_a_caption(self):
         texts = [c["text"] for c in build("Wait, I think we should go home now.")[0]]
-        self.assertEqual(texts[0], "Wait,")
+        self.assertEqual(texts[0], "Wait")  # the comma broke the line, then was removed (V4.8)
 
     def test_subject_stays_with_verb(self):
         texts = [c["text"] for c in build("Yesterday after a long day at work I finally called my mother back")[0]]
@@ -149,6 +149,50 @@ class Numbers(unittest.TestCase):
         }
         for spoken, shown in cases.items():
             self.assertEqual(" ".join(self.tokens(spoken)[0]), shown, spoken)
+
+    def test_digits_v48(self):
+        cases = {
+            "four": "4",
+            "I have four cats": "I have 4 cats",
+            "the first time": "the 1st time",
+            "my second chance": "my 2nd chance",
+            "on the twenty first": "on the 21st",
+            "the twenty-third floor": "the 23rd floor",
+            "eleventh hour": "11th hour",
+            "at seven thirty": "at 7:30",
+            "ten forty five p.m.": "10:45 p.m.",
+            "seven oh five": "7:05",
+            "eleven twelve years old": "11 12 years old",  # a range of ages, not a time
+            "only one ticket": "only 1 ticket",
+            "ten thousand people": "10000 people",  # no thousands comma: captions carry no commas
+        }
+        for spoken, shown in cases.items():
+            self.assertEqual(" ".join(self.tokens(spoken)[0]), shown, spoken)
+
+    def test_ordinal_and_time_take_both_words_times(self):
+        for text, shown in (("seven thirty", "7:30"), ("twenty first", "21st")):
+            words = words_of(text)
+            tokens = captions.make_tokens(words)
+            self.assertEqual([t["text"] for t in tokens], [shown])
+            cue = captions.build_cues(tokens, words, line_rules())[0]
+            self.assertEqual((cue["start"], cue["text"]), (words[0]["start"], shown))
+            self.assertAlmostEqual(cue["end"], words[1]["end"] + captions.END_TAIL, places=3)
+
+    def test_second_as_time_stays(self):
+        for text in ("wait a second", "just one second", "second chance"):
+            self.assertNotIn("2nd", " ".join(self.tokens(text)[0]), text)
+
+    def test_v48_exceptions(self):
+        for text in ("no one", "someone", "the one", "anyone", "everyone", "at first", "first of all"):
+            self.assertEqual(" ".join(self.tokens(text)[0]), text, text)
+
+    def test_hinglish_counting(self):
+        self.assertEqual(" ".join(self.tokens("ek do teen char", "hinglish")[0]), "1 2 3 4")
+        self.assertEqual(" ".join(self.tokens("ek, do, teen", "hinglish")[0]), "1, 2, 3")
+        self.assertEqual(" ".join(self.tokens("char paanch log", "hinglish")[0]), "4 5 log")
+        self.assertEqual(" ".join(self.tokens("mujhe ek do", "hinglish")[0]), "mujhe ek do")  # give me one
+        self.assertEqual(" ".join(self.tokens("paise do mujhe", "hinglish")[0]), "paise do mujhe")
+        self.assertEqual(" ".join(self.tokens("saat saal", "hinglish")[0]), "7 saal")
 
     def test_expressions_stay_words(self):
         for text in ("not one inch", "one time only", "you two", "the one I love", "no one came"):
@@ -279,6 +323,63 @@ class Timing(unittest.TestCase):
         words = captions.words_from_segments(segments, ["hello world", "not sung here", "bye"])
         self.assertEqual([w["line"] for w in words], [0, 0, 1, 1, 1, 2])  # 4 segments, 3 lines
         self.assertEqual(captions.unmatched_lines(words), [1])
+
+
+class CleanCaptions(unittest.TestCase):
+    """V4.8: captions keep letters, digits, spaces, full stops, apostrophes inside words, % after a
+    number and a time's colon; everything else goes."""
+
+    def test_kept(self):
+        for text in ("Don't stop", "I’m Aditi’s friend", "It's 70% done.", "At 7:30 a.m.", "मैं ठीक हूँ।",
+                     "Version 3.5", "Café naïve"):
+            self.assertEqual(captions.clean_caption(text), text, text)
+
+    def test_removed(self):
+        cases = {
+            '"Hello," she said': "Hello she said",
+            "“Quoted” and ‘single’": "Quoted and single",
+            "Wait... what?!": "Wait what",
+            "so… yes": "so yes",
+            "well-known — really": "well known really",
+            "and/or": "and or",
+            "(brackets) [and] {braces}": "brackets and braces",
+            "a; b: c": "a b c",
+            "*stars* #tag @me & co": "stars tag me co",
+            "hi 😀👍🏽 there": "hi there",
+            "players' bus": "players bus",
+            "% alone": "alone",
+            "time:": "time",
+            "¿Qué? ¡Sí!": "Qué Sí",
+        }
+        for raw, shown in cases.items():
+            self.assertEqual(captions.clean_caption(raw), shown, raw)
+
+    def test_break_before_strip(self):
+        """The punctuation still decides the line breaks, then it's removed."""
+        cues, tokens, _ = build("Wait, stop. I think, honestly, we should go home now!")
+        self.assertEqual([c["text"] for c in cues][:2], ["Wait", "stop."])
+        self.assertTrue(any(t["text"].endswith(",") for t in tokens))  # still in the tokens
+        for c in cues:
+            self.assertEqual(c["text"], captions.clean_caption(c["text"]))
+
+    def test_both_modes(self):
+        for mode in ("line", "word"):
+            cues = build('She said, "Don’t—go!"', rules=line_rules(mode=mode))[0]
+            joined = " ".join(c["text"] for c in cues)
+            self.assertEqual(joined, "She said Don’t go", mode)
+
+    def test_symbol_only_caption_dropped(self):
+        cues = build("Hello ♪ ♪ there", rules=line_rules(mode="word"))[0]
+        self.assertEqual([c["text"] for c in cues], ["Hello", "there"])
+
+    def test_ai_change_positions_follow_clean_text(self):
+        words = words_of("well-known hello, wrld")
+        tokens = captions.make_tokens(words)
+        tokens[2] = {**tokens[2], "orig": "wrld", "text": "world"}
+        tokens[1] = {**tokens[1], "orig": "hello,", "text": "hello"}  # punctuation only: not shown
+        cue = captions.build_cues(tokens, words, line_rules())[0]
+        self.assertEqual(cue["text"], "well known hello world")
+        self.assertEqual(cue["ai"], [{"i": 3, "from": "wrld", "to": "world"}])
 
 
 class ChunkCheck(unittest.TestCase):

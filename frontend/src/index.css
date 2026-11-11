@@ -18,6 +18,8 @@
   --ok-soft: rgba(23, 128, 91, 0.09);
   --warn: #91650f;
   --warn-soft: rgba(145, 101, 15, 0.09);
+  --check: #c2410c;
+  --check-soft: rgba(234, 88, 12, 0.10);
   --shadow: 0 1px 2px rgba(15, 19, 32, 0.05), 0 8px 32px rgba(15, 19, 32, 0.07);
   --wave: #d0d4e0;
   --wave-progress: #3a4ee8;
@@ -44,6 +46,8 @@
   --ok-soft: rgba(78, 207, 157, 0.11);
   --warn: #d8ac52;
   --warn-soft: rgba(216, 172, 82, 0.11);
+  --check: #fb923c;
+  --check-soft: rgba(251, 146, 60, 0.13);
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 32px rgba(0, 0, 0, 0.4);
   --wave: #29304a;
   --wave-progress: #6b7dff;
@@ -1095,6 +1099,24 @@ textarea.lyrics::placeholder { color: var(--muted); }
 .edited-badge { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
   padding: 2px 7px; border-radius: 999px; background: var(--accent); color: var(--accent-ink); margin-left: 8px; vertical-align: middle; }
 .dl-side { display: flex; flex-direction: column; gap: 8px; }
+/* V4.8 listening check */
+.rcue.check { box-shadow: inset 3px 0 0 var(--check); background: var(--check-soft); }
+.rcue.check .cue-num { color: var(--check); }
+.rcue-check { color: var(--check); font-size: 11.5px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.rcue-check button { font: inherit; font-size: 11px; padding: 1px 8px; border-radius: 999px; cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--check) 50%, transparent); background: var(--paper); color: var(--check); }
+.rcue-check button:hover { background: var(--check); color: var(--paper); }
+.rcue-fixed { color: var(--ok); font-size: 11.5px; }
+.unsure-mark { color: var(--check); font-family: var(--font-mono); font-size: 11px; margin-left: 2px; vertical-align: super;
+  background: none; border: 0; padding: 0; cursor: pointer; }
+.listen-unsure { color: var(--check); }
+.listen-summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  padding: 9px 12px; border-radius: 10px; font-size: 13px; color: var(--check); background: var(--check-soft);
+  border: 1px solid color-mix(in srgb, var(--check) 35%, transparent); }
+.listen-summary.clear { color: var(--ok); background: var(--ok-soft); border-color: color-mix(in srgb, var(--ok) 35%, transparent); }
+.verified-badge, .edited-badge.verified { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em;
+  text-transform: uppercase; padding: 2px 8px; border-radius: 999px; background: var(--ok); color: var(--paper); }
+.edited-badge.verified { margin-left: 6px; }
 .dl-side .dl-secondary { flex: 1; }
 .review-save { margin: 0; }
 /* A long Review panel scrolls inside the sticky output column; the player never shrinks (V4.5). */

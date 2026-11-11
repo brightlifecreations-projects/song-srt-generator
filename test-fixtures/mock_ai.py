@@ -5,8 +5,9 @@
 Point the app's Custom provider at http://127.0.0.1:<port>/<mode>/v1 (a local Custom server needs
 no key). Modes, chosen by the URL:
 
-    ok         final check: fixes two words (a capital and a one-letter spelling change) and keeps
-               the cuts; AI polish: returns the draft unchanged
+    ok         final check: changes two words (swaps two letters of one, which the listening check
+               puts back since the audio says otherwise; capitalises another), marks a third
+               unsure ([?]) and keeps the cuts; AI polish: returns the draft unchanged
     badjson    answers with text that isn't JSON
     wordcount  final check: turns one word into two (must be refused: word count changed)
 
@@ -29,7 +30,8 @@ def final_check_answer(payload: dict, mode: str) -> dict:
         changes.append({"i": first["i"], "t": first["t"][:-2] + first["t"][-1] + first["t"][-2]})  # a typo-style fix
         if len(words) > 1:
             changes.append({"i": words[1]["i"], "t": words[1]["t"].capitalize()})
-    return {"tokens": changes, "cue_starts": payload["cue_starts"]}
+    unsure = [words[2]["i"]] if mode == "ok" and len(words) > 2 else []
+    return {"tokens": changes, "cue_starts": payload["cue_starts"], "unsure": unsure}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -47,7 +49,7 @@ class Handler(BaseHTTPRequestHandler):
             f.write(json.dumps({"mode": mode, "system": system[:80], "user": json.loads(user)}, ensure_ascii=False) + "\n")
         if mode == "badjson":
             content = "Sure! Here are the captions you asked for."
-        elif "final check" in system:
+        elif "tokens" in json.loads(user):  # the final check (AI polish sends "lines")
             content = json.dumps(final_check_answer(json.loads(user), mode), ensure_ascii=False)
         else:  # AI polish of a draft: same lines back
             content = json.dumps({"lines": [line["text"] for line in json.loads(user)["lines"]]}, ensure_ascii=False)

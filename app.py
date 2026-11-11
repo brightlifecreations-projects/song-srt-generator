@@ -92,7 +92,8 @@ def _run_job(job: dict):
                        job.get("check_with"))
     if job["task"] == "relayout":
         steps = [({"build"}, "Build subtitles")] + ([({"check"}, f"Final check with {job['check_with']}")]
-                                                    if job.get("check_with") else [])
+                                                    if job.get("check_with") else []) \
+            + ([({"listen"}, "Listening check")] if config.LISTEN_CHECK else [])
     report = make_reporter(steps, progress)
     if job["task"] == "lyrics":
         preprocess_lyrics(job["lyrics_text"], strip_tags=job["strip_tags"])  # fail fast
@@ -123,6 +124,7 @@ def _run_job(job: dict):
         job.update(status="done", message="Done", cues=result["cues"], caption_mode=result["caption_mode"],
                    max_chars=result["max_chars"], edited_srt_path=None, edited_cues=None,
                    check_message=result["ai_message"], ai_check_changes=result["ai_changes"],
+                   listen_summary=result["listen"],
                    warnings=warnings + ([result["ai_message"]] if result["ai_message"] else []))
         return
     if job["task"] == "polish":  # "Polish again": the text in the draft box, as it is now
@@ -145,7 +147,7 @@ def _run_job(job: dict):
         original_srt_path=str(result["original_srt_path"]), edited_srt_path=None, edited_cues=None,
         video_format=job.get("video_format"), max_chars=result["max_chars"],
         caption_mode=result["caption_mode"], check_message=result["ai_message"],
-        ai_check_changes=result["ai_changes"],
+        ai_check_changes=result["ai_changes"], listen_summary=result.get("listen"),
     )
     if job["task"] == "align":  # an approved transcript: learn its fixes
         job["corrections_recorded"] = record_approval(ctx, job["lyrics_text"])
@@ -481,7 +483,8 @@ async def switch_captions(job_id: str, request: Request):
     check_with = ai_polish.provider_name(check["provider"]) if check else None
     job.update(task="relayout", caption_mode=mode, check=check, check_with=check_with, stage=0,
                status="queued", message="Rebuilding the captions…",
-               steps=["Build subtitles"] + ([f"Final check with {check_with}"] if check else []))
+               steps=["Build subtitles"] + ([f"Final check with {check_with}"] if check else [])
+               + (["Listening check"] if config.LISTEN_CHECK else []))
     _work_queue.put(job_id)
     return {"job_id": job_id}
 
@@ -512,7 +515,7 @@ PUBLIC_KEYS = ("status", "stage", "steps", "message", "progress", "mode", "secti
                "corrections_recorded", "review_marks", "engine", "quality", "topic_words",
                "offline_draft", "ai_marks", "ai_message", "ai_provider", "polish_run",
                "edited_cues", "video_format", "max_chars", "retime_result", "caption_mode",
-               "check_message", "ai_check_changes", "check_with")
+               "check_message", "ai_check_changes", "check_with", "listen_summary")
 
 
 @app.get("/api/jobs/{job_id}")

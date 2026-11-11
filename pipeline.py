@@ -775,11 +775,13 @@ def flow_steps(mode: str, section: str, isolate: str = "on",
                polish_with: str | None = None, check_with: str | None = None) -> list[tuple[set, str]]:
     """The progress steps a flow shows, as (stage keys, title). mode: "lyrics" or "transcribe".
     polish_with: the AI provider's name when AI polish is on (transcribe mode). check_with: the
-    provider's name when the final AI check runs after the captions are built (V4.6)."""
+    provider's name when the final AI check runs after the captions are built (V4.6). The listening
+    check (V4.8) is always the last step."""
     song = section == "song"
     first = ({"prepare", "separate"},
              ISOLATE_TITLES[section] if isolate == "on" else "Prepare audio")
     check = [({"check"}, f"Final check with {check_with}")] if check_with else []
+    check += [({"listen"}, "Listening check")] if config.LISTEN_CHECK else []
     if mode == "transcribe":
         polish = [({"polish"}, f"Polish with {polish_with}")] if polish_with else []
         return [first, ({"transcribe"}, "Transcribe"), *polish,
@@ -1325,7 +1327,8 @@ def build_layout(ctx: dict, rules: dict, ai: dict | None, report=lambda key, msg
             language = language_name(ctx["whisper_language_used"]) if ctx.get("whisper_language_used") else None
         result = final_check.review(tokens, words, current, ai, section=ctx["section"],
                                     language=language,
-                                    script=ctx.get("script"), script_text=tl.get("script_text"), rules=rules)
+                                    script=ctx.get("script"), script_text=tl.get("script_text"), rules=rules,
+                                    exceptions=number_exceptions())
         message = result["message"]
         tl["ai"][key] = {"chunks": result["chunks"], "message": message}
         if result["changes"]:
@@ -1335,8 +1338,19 @@ def build_layout(ctx: dict, rules: dict, ai: dict | None, report=lambda key, msg
         saved = tl["ai"].get(key, {}).get("chunks")
         chunks = captions.merge_cuts(tokens, words, saved, rules)[0] if saved \
             else captions.line_chunks(tokens, words, rules)
-    cues = captions.build_cues(tokens, words, {**rules, "audio_end": ctx.get("duration")}, chunks)
-    return {"cues": cues, "ai_message": message, "ai_provider": provider,
+    cue_rules = {**rules, "audio_end": ctx.get("duration")}
+    cues = captions.build_cues(tokens, words, cue_rules, chunks)
+    listen = None
+    if config.LISTEN_CHECK:  # V4.8: every caption checked against the audio, after the AI check
+        import listen_check
+        t0 = time.perf_counter()
+        listened = listen_check.run(ctx, tokens, words, cues, cue_rules, report)
+        cues, listen = listened["cues"], listened["summary"]
+        if listened.get("changed"):  # its fixes live in the timeline, so a Line/Word switch keeps them
+            tl["words"] = listened["words"]
+            tl["ai_tokens" if tl.get("ai_tokens") else "tokens"] = listened["tokens"]
+        ctx.setdefault("timings", {})["listen_seconds"] = round(time.perf_counter() - t0, 2)
+    return {"cues": cues, "ai_message": message, "ai_provider": provider, "listen": listen,
             "ai_changes": sum(len(c.get("ai", [])) for c in cues)}
 
 
@@ -1349,12 +1363,18 @@ def _log_ai(ctx: dict, result: dict, rules: dict):
         runs = []
     runs.append({"provider": result.get("provider"), "seconds": result.get("seconds"), "mode": rules["mode"],
                  "changes": result["changes"], "cuts_used": result["chunks"] is not None,
+                 "refused": result.get("refused") or [], "unsure": result.get("unsure") or [],
                  "message": result["message"], "sent": result["sent"], "returned": result["returned"]})
     path.write_text(json.dumps(runs, indent=1, ensure_ascii=False), encoding="utf-8")
     ctx["log"].info("Final AI check (%s, %s mode) in %ss: %d text fixes, AI cuts %s%s",
                     result.get("provider"), rules["mode"], result.get("seconds"), result["changes"],
                     "used" if result["chunks"] is not None else "not used",
                     f" — {result['message']}" if result["message"] else "")
+    for r in result.get("refused") or []:  # V4.8: every refused change, and why
+        ctx["log"].info("Final AI check: refused “%s” -> “%s” (word %d): %s", r["from"], r["to"], r["i"], r["why"])
+    if result.get("unsure"):
+        ctx["log"].info("Final AI check: marked [?] (unsure): %s",
+                        ", ".join(f"“{result['tokens'][k]['text']}”" for k in result["unsure"]))
 
 
 def write_outputs(ctx: dict, layout: dict, rules: dict, extra: dict | None = None) -> dict:
@@ -1371,6 +1391,7 @@ def write_outputs(ctx: dict, layout: dict, rules: dict, extra: dict | None = Non
     tl = ctx["timeline"]
     timeline = {k: tl[k] for k in ("words", "tokens", "lines", "speakers", "dropped_lines", "numbers_language")}
     timeline["ai_tokens"] = tl.get("ai_tokens")
+    timeline["heard"] = tl.get("heard")
     (job_dir / "timeline.json").write_text(json.dumps(timeline, ensure_ascii=False), encoding="utf-8")
     isolated = ctx["source_path"] == ctx["vocals_path"]
     meta = ctx.setdefault("cues_meta", {})
@@ -1395,6 +1416,7 @@ def write_outputs(ctx: dict, layout: dict, rules: dict, extra: dict | None = Non
         "model_size": config.MODEL_SIZE,
         **{k: meta.get(k) for k in ("language", "script", "whisper_language", "timing", "speakers",
                                     "dropped_lines", "final_check")},
+        "listen_check": layout.get("listen"),
         "transcribe_language": ctx.get("transcribe_language"),
         "spoken_language": ctx.get("detected_language"),
         "task": ctx.get("task"),
@@ -1416,7 +1438,7 @@ def write_outputs(ctx: dict, layout: dict, rules: dict, extra: dict | None = Non
     ctx["rules"] = rules
     return {"srt_path": srt_path, "original_srt_path": original_srt, "cues_path": job_dir / "cues.json",
             "cues": cues, "max_chars": rules["max_chars"], "caption_mode": rules["mode"],
-            "ai_message": layout["ai_message"], "ai_changes": layout["ai_changes"]}
+            "ai_message": layout["ai_message"], "ai_changes": layout["ai_changes"], "listen": layout.get("listen")}
 
 
 def relayout(ctx: dict, caption_mode: str, ai: dict | None = None, report=lambda key, msg: None,
