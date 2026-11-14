@@ -23,9 +23,9 @@ const VideoPreview = forwardRef(function VideoPreview(
     setPlayable(null);
     setTime(0);
     if (!file) { setFileUrl(url || null); return; }  // a job opened from History: the server's copy
-    const url = URL.createObjectURL(file);
-    setFileUrl(url);
-    return () => URL.revokeObjectURL(url);
+    const objectUrl = URL.createObjectURL(file);
+    setFileUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
   }, [file, url]);
 
   function report(ok) {

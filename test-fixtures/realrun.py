@@ -4,6 +4,9 @@ when a provider is set up in the data folder, the final AI check. Test fixture, 
     SRT_DATA_DIR=<test data folder> python test-fixtures/realrun.py <name> <audio> lyrics <lyrics.txt> <language> <section>
     SRT_DATA_DIR=<test data folder> python test-fixtures/realrun.py <name> <audio> transcribe <script> <section> [quality]
 
+V4.9: also the script lines recovered / flagged / not found, possible missing captions, and how much of
+the job folder the Detailed log takes (log.txt + job.json).
+
 Writes <name>.json next to the data folder: timings, the AI check's result, the listening check's
 summary and every caption it fixed or flagged (with the reason), and the final SRT text.
 A transcribe run approves the draft as it comes (what the user would see, unchanged).
@@ -59,12 +62,19 @@ def main(argv):
                    for i, c in enumerate(cues) if c.get("unsure")],
         "ai_fixes": [{"n": i + 1, **a} for i, c in enumerate(cues) for a in c.get("ai", [])],
         "warnings": result["warnings"],
+        "script_lines": [x for x in json.loads((Path(result["job_dir"]) / "job.json").read_text(encoding="utf-8"))
+                         .get("script_lines", []) if x["status"] != "kept"],
+        "script_summary": result.get("script_summary"), "not_found": result.get("not_found"),
+        "missing": result.get("missing"),
+        "folder_bytes": sum(f.stat().st_size for f in Path(result["job_dir"]).rglob("*") if f.is_file()),
+        "log_bytes": {n: (Path(result["job_dir"]) / n).stat().st_size for n in ("log.txt", "job.json")},
         "draft": draft["draft_text"] if draft else None,
         "srt": result["srt_path"].read_text(encoding="utf-8"),
     }
     path = data.parent / f"{name}.json"
     path.write_text(json.dumps(out, indent=1, ensure_ascii=False), encoding="utf-8")
-    print(json.dumps({k: out[k] for k in ("name", "total_seconds", "timings", "cues", "final_check", "listen")},
+    print(json.dumps({k: out[k] for k in ("name", "total_seconds", "timings", "cues", "final_check", "listen",
+                                          "script_summary", "missing", "folder_bytes", "log_bytes")},
                      ensure_ascii=False, indent=1))
     print(f"fixed {len(out['fixed'])}, flagged {len(out['flagged'])} -> {path}")
     return 0

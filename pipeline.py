@@ -942,9 +942,13 @@ def start_job(audio_path, section: str = "song", report=lambda key, msg: None,
                 log.info("Preview copy: %s", "preview.mp4" if ctx["preview_path"] else "failed")
             if audio_path.stat().st_size <= KEEP_VIDEO_BYTES:  # History can show it again (V4.9)
                 kept = job_dir / f"video{audio_path.suffix.lower()}"
-                try:
-                    shutil.move(str(audio_path), kept)  # the upload folder is deleted anyway: no copy
-                except OSError:
+                uploads = (DATA_DIR / "uploads").resolve()
+                if uploads in audio_path.resolve().parents:  # the app's own upload copy: moved, no copy
+                    try:
+                        shutil.move(str(audio_path), kept)
+                    except OSError:
+                        shutil.copy2(audio_path, kept)
+                else:  # the CLI, warmup, a test: never move the user's own file
                     shutil.copy2(audio_path, kept)
                 ctx["video_path"] = kept
                 log.info("Video kept for History as %s", kept.name)

@@ -134,6 +134,7 @@ class JobLogging(unittest.TestCase):
         self.assertTrue(d["ai"][0]["request"])
         self.assertEqual(set(d["ai"][0]["usage"]), {"input_tokens", "output_tokens"})
         self.assertTrue((self.job / "video.mp4").exists())
+        self.assertTrue(self.video.exists())  # the user's own file is copied, never moved
         self.assertTrue((self.job / "thumb.jpg").exists())
 
     def test_log_txt_has_the_details(self):

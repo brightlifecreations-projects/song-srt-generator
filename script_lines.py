@@ -31,6 +31,7 @@ HEARD_SHARE = 0.5      # share of a line's words that must be heard (agree or cl
 SPEECH_MIN = 0.25      # seconds of voice activity that count as speech in a stretch
 SEARCH_PAD = 1.0       # seconds of audio either side of a gap heard with it (context for Whisper)
 WINDOW = 20.0          # longest stretch heard in one Whisper call
+EDGE = 0.3             # seconds at each end of a gap that belong to the neighbours when looking for speech
 NO_PLACE = "no place"  # a line with no time of its own
 
 
@@ -184,7 +185,12 @@ def resolve(ctx: dict, words: list[dict], lines: list[str], *, threshold: float,
         caption = [(i, w) for i in run for w in lines[i].split()]
         keys = [listen_check._key(w) for _, w in caption]
         matched = listen_check.match(keys, [t["key"] for t in tokens]) if tokens else [([], 0.0)] * len(caption)
-        gap_speech = _speech(speech, t0, t1) if speech is not None else None
+        # "Is there speech?" is decided on the inside of the gap: the aligner's edges can be 0.2 s off,
+        # so the neighbours' first and last sounds (and words) would otherwise count as this line's.
+        margin = min(EDGE, (t1 - t0) / 4)
+        i0, i1 = t0 + margin, t1 - margin
+        inner_heard = [t for t in tokens if i0 <= (t["start"] + t["end"]) / 2 <= i1 and t["prob"] >= 0.3]
+        gap_speech = _speech(speech, i0, i1) if speech is not None else None
         for i in run:
             pairs = [(m, s) for (li, _), (m, s) in zip(caption, matched) if li == i]
             n = len(pairs) or 1
@@ -193,11 +199,9 @@ def resolve(ctx: dict, words: list[dict], lines: list[str], *, threshold: float,
             heard_ids = sorted({k for m, _ in hits for k in m})
             heard_text = " ".join(tokens[k]["text"] for k in heard_ids)
             span = placed.get(i) or []
-            p0, p1 = (span[0]["start"], span[-1]["end"]) if span else (t0, t1)
-            line_speech = _speech(speech, p0 - 0.2, p1 + 0.2) if speech is not None else None
             r = results[i]
             r.update(searched=[round(t0, 3), round(t1, 3)], heard=heard_text, heard_share=round(share, 2),
-                     realigned=realigned, speech_seconds=round(line_speech, 2) if line_speech is not None else None)
+                     realigned=realigned, speech_seconds=round(gap_speech, 2) if gap_speech is not None else None)
             if share >= HEARD_SHARE:
                 ws = span
                 if heard_ids and ws:  # the re-alignment must sit where the words were heard
@@ -207,19 +211,16 @@ def resolve(ctx: dict, words: list[dict], lines: list[str], *, threshold: float,
                                      {i: ws})[i]
                 new_by[i] = ws
                 r.update(status="recovered", reason=f"heard in the gap ({round(share * 100)}% of its words)")
-            elif (tokens or not hearing) and (line_speech is None or line_speech >= SPEECH_MIN or gap_speech >= SPEECH_MIN):
+            elif hearing is None or speech is None:
+                new_by[i] = span  # can't tell whether it's spoken: keep it, and say so
+                r.update(status="flagged", reason="couldn't be checked against the audio")
+            elif inner_heard or gap_speech >= SPEECH_MIN:
                 new_by[i] = span
-                r.update(status="flagged", reason="speech here, but the words didn't clearly match"
-                         if tokens else "not re-heard (the listening check can't run for this job)")
-            elif not tokens and gap_speech is not None and gap_speech < SPEECH_MIN:
-                new_by.pop(i, None)
-                r.update(status="not_found", reason="no speech in the gap between its neighbours")
-            elif line_speech is not None and line_speech >= SPEECH_MIN:
-                new_by[i] = span
-                r.update(status="flagged", reason="voice heard here, but Whisper wrote nothing")
+                r.update(status="flagged", reason="speech here, but the words didn't clearly match" if inner_heard
+                         else "voice heard here, but Whisper wrote nothing")
             else:
                 new_by.pop(i, None)
-                r.update(status="not_found", reason="no speech where it would be")
+                r.update(status="not_found", reason="no speech in the gap between its neighbours")
             if new_by.get(i):
                 r.update(start=new_by[i][0]["start"], end=new_by[i][-1]["end"])
             log.info("Script line %d %s (confidence %.3f%s; searched %.2f–%.2f s; heard %d%% %s; speech %s s): %s — %s",
