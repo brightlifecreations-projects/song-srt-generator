@@ -8,8 +8,10 @@ Lyrics/script mode: POST /api/jobs runs the whole flow. Transcribe mode: POST
 queues the alignment of the edited text against the same job's audio.
 """
 
+import atexit
 import json
 import os
+import traceback
 import queue
 import re
 import shutil
@@ -29,14 +31,17 @@ from fastapi.staticfiles import StaticFiles
 import ai_polish
 import config
 import final_check
+import history
+import joblog
+import report as problem_report
 import review
 import corrections
 import hinglish_model
-from pipeline import (ACCEPTED_EXTENSIONS, AUTO_LANGUAGE, DATA_DIR, DEFAULT_SCRIPT, QUALITIES,
+from pipeline import (ACCEPTED_EXTENSIONS, AUTO_LANGUAGE, DATA_DIR, DEFAULT_SCRIPT, JOBS_DIR, QUALITIES,
                       SCRIPT_CODES, PipelineError, align_and_write, clean_isolate, clean_section,
                       NUMBER_EXCEPTIONS_FILE, flow_steps, is_video, make_reporter, number_exceptions,
                       preprocess_lyrics, record_approval, relayout, run_polish, run_transcription,
-                      start_job)
+                      start_job, load_state, save_state, script_summary)
 import captions
 
 ROOT = Path(__file__).parent
@@ -50,6 +55,18 @@ VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip() if (ROOT / "VER
 on_focus_request = None
 
 app = FastAPI(title="SRT Generator", docs_url=None, redoc_url=None, openapi_url=None)
+
+# The app log (V4.9): app start and stop, every API request, the queue, settings, updates, crashes.
+log = joblog.setup_app_log()
+_env = joblog.environment()
+log.info("App start: SRT Generator %s, %s, %s, Python %s, data folder %s", VERSION, _env["os"], _env["cpu"],
+         _env["python"], DATA_DIR)
+log.debug("Environment: %s", joblog.dumps(_env))
+atexit.register(lambda: log.info("App stop"))
+_gone = history.cleanup(JOBS_DIR, joblog.settings()["job_keep_days"])
+if _gone:
+    log.info("Job clean-up: %d job folder(s) older than %d days deleted: %s", len(_gone),
+             joblog.settings()["job_keep_days"], ", ".join(_gone))
 
 # In-memory job registry: id -> state dict. Jobs also persist on disk in jobs/.
 JOBS: dict[str, dict] = {}
@@ -76,10 +93,7 @@ def _evict_finished_jobs():
     for job_id, job in list(JOBS.items()):
         if job.get("finished", float("inf")) < cutoff:
             JOBS.pop(job_id, None)
-            log = (job.get("ctx") or {}).get("log")
-            for handler in list(log.handlers) if log else []:
-                handler.close()  # Windows: an open log.txt would lock the job folder
-                log.removeHandler(handler)
+            joblog.close_logger((job.get("ctx") or {}).get("log"))
 
 
 def _run_job(job: dict):
@@ -98,12 +112,21 @@ def _run_job(job: dict):
     if job["task"] == "lyrics":
         preprocess_lyrics(job["lyrics_text"], strip_tags=job["strip_tags"])  # fail fast
     if job["task"] in ("lyrics", "transcribe"):
+        settings = {"mode": job["mode"], "language": job.get("language"), "format": job.get("video_format"),
+                    "caption_mode": job.get("caption_mode"), "quality": job.get("quality"),
+                    "script": job.get("script"), "topic_words": job.get("topic_words") or None,
+                    "rerun_of": job.get("rerun_of"),
+                    "ai_polish": {"provider": job["ai"]["provider"], "model": job["ai"]["models"][job["ai"]["provider"]]}
+                    if job.get("ai") else None,
+                    "final_check": {"provider": job["check"]["provider"],
+                                    "model": job["check"]["models"][job["check"]["provider"]]} if job.get("check") else None}
         job["ctx"] = start_job(job["audio_path"], job["section"], report, job["isolate"],
-                               video_preview=job["video_preview"])
+                               video_preview=job["video_preview"], settings=settings)
         job["music_detected"] = job["ctx"]["music_detected"]
         job["audio_ready"] = True
         shutil.rmtree(job["upload_dir"], ignore_errors=True)
     ctx = job["ctx"]
+    joblog.bind_ctx(ctx)
     if job["task"] == "transcribe":
         draft = run_transcription(ctx, job["language"], report, job["script"], job["quality"],
                                   job["topic_words"], job.get("ai"))
@@ -124,7 +147,8 @@ def _run_job(job: dict):
         job.update(status="done", message="Done", cues=result["cues"], caption_mode=result["caption_mode"],
                    max_chars=result["max_chars"], edited_srt_path=None, edited_cues=None,
                    check_message=result["ai_message"], ai_check_changes=result["ai_changes"],
-                   listen_summary=result["listen"],
+                   listen_summary=result["listen"], missing=result["missing"], not_found=result["not_found"],
+                   script_summary=result["script_summary"],
                    warnings=warnings + ([result["ai_message"]] if result["ai_message"] else []))
         return
     if job["task"] == "polish":  # "Polish again": the text in the draft box, as it is now
@@ -148,6 +172,7 @@ def _run_job(job: dict):
         video_format=job.get("video_format"), max_chars=result["max_chars"],
         caption_mode=result["caption_mode"], check_message=result["ai_message"],
         ai_check_changes=result["ai_changes"], listen_summary=result.get("listen"),
+        missing=result["missing"], not_found=result["not_found"], script_summary=result["script_summary"],
     )
     if job["task"] == "align":  # an approved transcript: learn its fixes
         job["corrections_recorded"] = record_approval(ctx, job["lyrics_text"])
@@ -158,18 +183,35 @@ def _worker():
         job_id = _work_queue.get()
         job = JOBS[job_id]
         job.update(status="running")
+        joblog.bind_ctx(job.get("ctx"))
+        t0 = time.perf_counter()
+        log.info("Job %s started: %s (%s, %s)", job_id, job["task"], job.get("section"), job.get("mode"))
         try:
             _run_job(job)
         except PipelineError as e:
             job.update(status="error", message=str(e))
+            log.warning("Job %s failed: %s", job_id, e)
         except Exception:
             job.update(status="error", message=(
                 "Something went wrong while processing this file. "
-                "Check the newest folder in jobs/ for the log."
+                "Use Report a problem on the History page to send the log."
             ))
+            trace = traceback.format_exc()
+            log.error("Job %s crashed:\n%s", job_id, trace)
+            ctx = job.get("ctx")
+            if ctx and ctx.get("log"):
+                ctx["log"].error("Unhandled error:\n%s", trace)
+            if ctx and ctx.get("record"):
+                ctx["record"].finish("error", "Unhandled error (see log.txt)")
         finally:
             job["finished"] = time.time()
+            folder = (job.get("ctx") or {}).get("job_dir")
+            if folder and not job.get("job_dir"):
+                job["job_dir"] = folder.name
+            log.info("Job %s %s: %s in %.1fs (%s)", job_id, job.get("status"), job["task"], time.perf_counter() - t0,
+                     job.get("job_dir") or "no folder")
             shutil.rmtree(job["upload_dir"], ignore_errors=True)
+            joblog.bind(None, None)
             _work_queue.task_done()
 
 
@@ -190,6 +232,24 @@ async def cache_headers(request: Request, call_next):
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     else:
         response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Every API request in the app log: method, path, status, duration (polling at DEBUG)."""
+    if not request.url.path.startswith("/api/"):
+        return await call_next(request)
+    t0 = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        log.error("API %s %s raised:\n%s", request.method, request.url.path, traceback.format_exc())
+        raise
+    polling = request.method == "GET" and (re.fullmatch(r"/api/jobs/[\w-]+", request.url.path)
+                                           or request.url.path in ("/api/hinglish-model", "/api/updates"))
+    log.log(10 if polling else 20, "API %s %s -> %d in %.0f ms", request.method, request.url.path,
+            response.status_code, (time.perf_counter() - t0) * 1000)
     return response
 
 
@@ -261,10 +321,12 @@ def _github_check():
             release = json.load(r)
         latest = release["tag_name"].lstrip("vV")
         newer = VERSION != "dev" and _version_tuple(latest) > _version_tuple(VERSION)
+        log.info("Update check (GitHub): latest %s, this %s -> %s", latest, VERSION, "update available" if newer else "up to date")
         _github.update(status="available" if newer else "uptodate",
                        available={"version": latest, "notes": release.get("body") or "",
                                   "url": release["html_url"]} if newer else None)
-    except Exception:
+    except Exception as e:
+        log.warning("Update check (GitHub) failed: %s", type(e).__name__)
         _github.update(status="error", error="Couldn't reach GitHub — check the internet connection.")
     _github["last_checked"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
@@ -282,6 +344,7 @@ def updates_state():
 
 @app.post("/api/updates/check")
 def updates_check():
+    log.info("Update check requested (%s)", getattr(update_backend, "mode", "sparkle") if update_backend else "github")
     if update_backend is not None:
         update_backend.check()
     else:
@@ -302,6 +365,7 @@ def updates_install():
 @app.put("/api/updates/settings")
 async def updates_settings(request: Request):
     body = await request.json()
+    log.info("Setting changed: updates %s", {k: body[k] for k in ("auto_check", "auto_install") if k in body})
     if update_backend is not None:
         update_backend.set_automatic(body.get("auto_check"), body.get("auto_install"))
     elif "auto_check" in body:
@@ -316,8 +380,32 @@ def focus():
     return {"ok": True}
 
 
-def _save_upload(audio: UploadFile):
+def _from_job(name: str):
+    """Re-run (History): the earlier job's video (when kept) or audio, copied into uploads/<id>/."""
+    d = history.job_dir(JOBS_DIR, name)
+    sources = sorted(d.glob("video.*")) + sorted(d.glob("input.*")) if d else []
+    if not sources:
+        return JSONResponse({"error": "That job's audio is gone, so it can't be run again."}, status_code=404)
+    job_id = uuid.uuid4().hex[:12]
+    upload_dir = UPLOADS / job_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        original = json.loads((d / "job.json").read_text(encoding="utf-8"))["input"]["name"]
+    except (OSError, ValueError, KeyError, TypeError):
+        original = None
+    stem = Path(original).stem if original else d.name[16:] or "audio"
+    path = upload_dir / f"{stem}{sources[0].suffix}"
+    shutil.copy2(sources[0], path)
+    log.info("Re-run of %s: copied %s", d.name, sources[0].name)
+    return job_id, upload_dir, path
+
+
+def _save_upload(audio: UploadFile | None, from_job: str = ""):
     """Stream the upload into uploads/<id>/. Returns (job_id, upload_dir, path) or an error response."""
+    if from_job:
+        return _from_job(from_job)
+    if audio is None:
+        return JSONResponse({"error": "No file was sent."}, status_code=400)
     job_id = uuid.uuid4().hex[:12]
     upload_dir = UPLOADS / job_id
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -366,12 +454,14 @@ def _queue(job_id: str, job: dict):
     job.setdefault("stage", 0)
     JOBS[job_id] = job
     _work_queue.put(job_id)
+    log.info("Job %s queued: %s, %s (%d waiting)", job_id, job["task"], job.get("section"), _work_queue.qsize())
     return {"job_id": job_id}
 
 
 @app.post("/api/jobs")
 async def create_job(
-    audio: UploadFile = File(...),
+    audio: UploadFile | None = File(None),
+    from_job: str = Form(""),
     lyrics: str = Form(...),
     strip_tags: bool = Form(True),
     video_format: str = Form(""),
@@ -388,12 +478,12 @@ async def create_job(
     video_format, language, section = _clean_choices(
         video_format, language, section, config.LANGUAGE)
     _evict_finished_jobs()
-    saved = _save_upload(audio)
+    saved = _save_upload(audio, from_job)
     if isinstance(saved, JSONResponse):
         return saved
     job_id, upload_dir, audio_path = saved
     job = {
-        "task": "lyrics", "mode": "lyrics", "created": time.time(),
+        "task": "lyrics", "mode": "lyrics", "created": time.time(), "rerun_of": from_job or None,
         "audio_path": str(audio_path), "upload_dir": str(upload_dir), "lyrics_text": lyrics,
         "strip_tags": strip_tags, "video_format": video_format, "language": language,
         "section": section, "isolate": clean_isolate(isolate, section),
@@ -405,7 +495,8 @@ async def create_job(
 
 @app.post("/api/transcribe")
 async def create_transcription(
-    audio: UploadFile = File(...),
+    audio: UploadFile | None = File(None),
+    from_job: str = Form(""),
     language: str = Form(config.TRANSCRIBE_LANGUAGE),
     section: str = Form("song"),
     isolate: str = Form(""),
@@ -422,7 +513,7 @@ async def create_transcription(
     _, language, section = _clean_choices(
         config.FORMAT_DEFAULT, language, section, config.TRANSCRIBE_LANGUAGE)
     _evict_finished_jobs()
-    saved = _save_upload(audio)
+    saved = _save_upload(audio, from_job)
     if isinstance(saved, JSONResponse):
         return saved
     job_id, upload_dir, audio_path = saved
@@ -430,7 +521,7 @@ async def create_transcription(
     if ai and not ai["auto"]:
         ai = None  # polished only when the user clicks "Polish" on the draft
     return _queue(job_id, {
-        "task": "transcribe", "mode": "transcribe", "created": time.time(),
+        "task": "transcribe", "mode": "transcribe", "created": time.time(), "rerun_of": from_job or None,
         "ai": ai, "polish_with": ai_polish.provider_name(ai["provider"]) if ai else None,
         "audio_path": str(audio_path), "upload_dir": str(upload_dir),
         "language": language, "section": section, "isolate": clean_isolate(isolate, section),
@@ -515,7 +606,8 @@ PUBLIC_KEYS = ("status", "stage", "steps", "message", "progress", "mode", "secti
                "corrections_recorded", "review_marks", "engine", "quality", "topic_words",
                "offline_draft", "ai_marks", "ai_message", "ai_provider", "polish_run",
                "edited_cues", "video_format", "max_chars", "retime_result", "caption_mode",
-               "check_message", "ai_check_changes", "check_with", "listen_summary")
+               "check_message", "ai_check_changes", "check_with", "listen_summary", "missing", "not_found",
+               "script_summary", "restored", "source_file")
 
 
 @app.get("/api/jobs/{job_id}")
@@ -528,6 +620,10 @@ def job_state(job_id: str):
     state["has_vocals"] = bool(ctx.get("vocals_path"))
     state["edited"] = bool(job.get("edited_srt_path"))
     state["has_preview"] = bool(ctx.get("preview_path"))
+    state["has_video"] = bool(ctx.get("video_path") or ctx.get("preview_path"))
+    if ctx.get("job_dir"):
+        state["job_dir"] = ctx["job_dir"].name
+    state.setdefault("source_file", ctx.get("source_file"))
     return state
 
 
@@ -569,6 +665,7 @@ async def save_cues(job_id: str, request: Request):
         cues = review.clean_cues((await request.json()).get("cues", []))
     except (ValueError, TypeError, KeyError):
         return JSONResponse({"error": "Those cues aren't valid."}, status_code=400)
+    review.log_edits(job["ctx"], job.get("edited_cues") or job.get("cues") or [], cues)
     saved = review.save_edits(job["ctx"], cues, job.get("cues") or [])
     job.update(edited_srt_path=str(saved["path"]), edited_cues=cues,
                review_recorded=saved["recorded_total"])
@@ -607,6 +704,18 @@ def job_audio(job_id: str):
     path = ctx["input_audio"]
     media = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
              ".flac": "audio/flac"}.get(path.suffix, "application/octet-stream")
+    return FileResponse(path, media_type=media)
+
+
+@app.get("/api/jobs/{job_id}/video")
+def job_video(job_id: str):
+    """The job's own video (kept in the job folder since 4.9), for a job opened from History."""
+    ctx = JOBS.get(job_id, {}).get("ctx", {})
+    path = ctx.get("video_path") or ctx.get("preview_path")
+    if not path:
+        return JSONResponse({"error": "not ready"}, status_code=404)
+    media = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+             ".mkv": "video/x-matroska"}.get(Path(path).suffix.lower(), "video/mp4")
     return FileResponse(path, media_type=media)
 
 
@@ -665,6 +774,7 @@ async def corrections_put(request: Request):
         return JSONResponse({"error": "Some rows aren't valid.", "errors": e.errors}, status_code=422)
     with corrections._lock:
         corrections.save(DATA_DIR, tables)
+    log.info("Corrections saved from the app (%d rows)", sum(len(r) for r in tables.values()))
     return _corrections_state(tables)
 
 
@@ -766,6 +876,7 @@ async def spellings_put(request: Request):
     except corrections.CorrectionsError as e:
         return JSONResponse({"error": "Some rows aren't valid.", "errors": e.errors}, status_code=422)
     corrections.save_spellings(DATA_DIR, rows)
+    log.info("Hinglish spellings saved from the app (%d rows)", len(rows))
     return _spellings_state(rows)
 
 
@@ -798,6 +909,9 @@ async def ai_put(request: Request):
                 "keys_saved": current["keys_saved"]}  # changed only by saving or removing a key
     if settings["enabled"] and not ai_polish.usable(settings)[0]:
         settings["enabled"] = False  # off until it can actually run (a key, a model, a URL)
+    changed = {k: settings[k] for k in settings if k != "keys_saved" and settings[k] != current.get(k)}
+    if changed:
+        log.info("Setting changed: AI %s", joblog.dumps(changed))
     ai_polish.save_settings(settings)
     return ai_polish.public_state()
 
@@ -874,6 +988,7 @@ async def number_exceptions_put(request: Request):
                 "# as digits: 'twelve years' becomes '12 years'. Edited in the app's Corrections page.\n"
                 + "\n".join(phrases) + "\n")
         path.write_bytes(text.encode("utf-8"))
+    log.info("Setting changed: number exceptions %s", "reset" if body.get("reset") else f"{len(phrases)} phrases")
     return number_exceptions_get()
 
 
@@ -887,8 +1002,243 @@ def hinglish_model_status():
 
 @app.post("/api/hinglish-model/download")
 def hinglish_model_download():
+    log.info("Hinglish model download requested")
     hinglish_model.start_background_download()
     return hinglish_model.status()
+
+
+# ---------------------------------------------------------------------------
+# App settings: log level and job clean-up (V4.9)
+
+@app.get("/api/settings")
+def settings_get():
+    return {**joblog.settings(), "logs_folder": joblog.redact(str(joblog.LOGS_DIR)),
+            "app_log_bytes": sum(p.stat().st_size for p in joblog.app_log_files())}
+
+
+@app.put("/api/settings")
+async def settings_put(request: Request):
+    joblog.save_settings(await request.json())
+    return settings_get()
+
+
+@app.post("/api/logs/clear")
+def logs_clear():
+    """Empty the app log (job logs stay with their jobs; delete a job to remove its log)."""
+    joblog.clear_logs()
+    return settings_get()
+
+
+# ---------------------------------------------------------------------------
+# History (V4.9)
+
+def _history_dir(name: str):
+    d = history.job_dir(JOBS_DIR, name)
+    return d if d else JSONResponse({"error": "That job isn't there any more."}, status_code=404)
+
+
+@app.get("/api/history")
+def history_list(q: str = "", section: str = "", status: str = "", date_from: str = "", date_to: str = ""):
+    jobs = history.list_jobs(JOBS_DIR)
+    shown = history.filter_jobs(jobs, JOBS_DIR, q=q, section=section, status=status, date_from=date_from,
+                                date_to=date_to)
+    running = {j.get("job_dir") for j in JOBS.values() if j.get("status") in ("queued", "running")}
+    for j in shown:
+        j["running"] = j["name"] in running
+    return {"jobs": shown, "total": len(jobs), **joblog.settings()}
+
+
+@app.get("/api/history/{name}/thumb")
+def history_thumb(name: str):
+    d = _history_dir(name)
+    if isinstance(d, JSONResponse) or not (d / "thumb.jpg").exists():
+        return JSONResponse({"error": "no thumbnail"}, status_code=404)
+    return FileResponse(d / "thumb.jpg", media_type="image/jpeg")
+
+
+@app.get("/api/history/{name}/media")
+def history_media(name: str):
+    """The job's kept video, else its audio (Re-run shows it before the new job starts)."""
+    d = _history_dir(name)
+    if isinstance(d, JSONResponse):
+        return d
+    found = sorted(d.glob("video.*")) + sorted(d.glob("input.*"))
+    if not found:
+        return JSONResponse({"error": "not there"}, status_code=404)
+    media = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+             ".mkv": "video/x-matroska", ".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
+             ".flac": "audio/flac"}.get(found[0].suffix.lower(), "application/octet-stream")
+    return FileResponse(found[0], media_type=media)
+
+
+@app.get("/api/history/{name}/log")
+def history_log(name: str):
+    d = _history_dir(name)
+    if isinstance(d, JSONResponse):
+        return d
+    text = (d / "log.txt").read_text(encoding="utf-8", errors="replace") if (d / "log.txt").exists() else ""
+    return {"name": name, "log": joblog.redact(text), "bytes": len(text.encode("utf-8"))}
+
+
+@app.post("/api/history/{name}/open")
+def history_open(name: str):
+    """Open a finished job again in its section's Review panel: captions, edits, flags, audio or video."""
+    d = _history_dir(name)
+    if isinstance(d, JSONResponse):
+        return d
+    for job_id, job in JOBS.items():  # still in memory: the same job
+        ctx = job.get("ctx") or {}
+        if ctx.get("job_dir") and ctx["job_dir"].name == name and job.get("status") == "done":
+            return {"job_id": job_id, "section": job["section"], "mode": job.get("mode")}
+    try:
+        ctx = load_state(d)
+        meta = json.loads((d / "cues.json").read_text(encoding="utf-8"))
+    except (PipelineError, OSError, ValueError) as e:
+        return JSONResponse({"error": str(e) if isinstance(e, PipelineError) else "This job has no captions to open."},
+                            status_code=409)
+    ctx["log"] = joblog.job_logger(d)
+    ctx["record"] = joblog.Record.load(d, ctx["log"])
+    ctx["log"].info("Opened again from History (app %s)", VERSION)
+    try:
+        edited = json.loads((d / "edited-cues.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        edited = None
+    srt = next((p for p in sorted(d.glob("*.srt")) if p.name not in ("original.srt", "edited.srt")), d / "original.srt")
+    tl = ctx.get("timeline") or {}
+    job_id = uuid.uuid4().hex[:12]
+    rules = ctx.get("rules") or {}
+    mode = "transcribe" if ctx.get("whisper_draft") is not None or (d / "transcript-draft.txt").exists() else "lyrics"
+    JOBS[job_id] = {
+        "task": "open", "mode": mode, "section": ctx["section"], "isolate": ctx.get("isolate"),
+        "status": "done", "message": "Done", "stage": 0, "steps": [], "created": time.time(),
+        "ctx": ctx, "upload_dir": str(UPLOADS / job_id), "restored": True, "source_file": ctx.get("source_file"),
+        "music_detected": ctx.get("music_detected"), "audio_ready": True,
+        "srt_path": str(srt), "srt_name": srt.name, "original_srt_path": str(d / "original.srt"),
+        "edited_srt_path": str(d / "edited.srt") if (d / "edited.srt").exists() else None,
+        "stem_path": str(ctx["vocals_path"]) if ctx.get("vocals_path") else None,
+        "job_dir": name, "cues": meta.get("cues") or [], "edited_cues": edited,
+        "timings": meta.get("timings") or {}, "warnings": [], "video_format": meta.get("video_format"),
+        "max_chars": meta.get("max_chars_per_line") or rules.get("max_chars"),
+        "caption_mode": meta.get("caption_mode") or rules.get("mode") or "line",
+        "check_message": (meta.get("final_check") or {}).get("message"),
+        "check_with": (meta.get("final_check") or {}).get("provider"),
+        "listen_summary": meta.get("listen_check"), "missing": meta.get("missing_captions") or [],
+        "not_found": meta.get("not_found") or tl.get("not_found") or [],
+        "script_summary": meta.get("script_lines") or script_summary(tl),
+        "finished": time.time(),
+    }
+    log.info("History: opened %s as job %s", name, job_id)
+    return {"job_id": job_id, "section": ctx["section"], "mode": mode}
+
+
+@app.get("/api/history/{name}/settings")
+def history_settings(name: str):
+    """What a Re-run starts from: the job's section, mode, settings and text."""
+    d = _history_dir(name)
+    if isinstance(d, JSONResponse):
+        return d
+    row = history.summary(d)
+    try:
+        record = json.loads((d / "job.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = {}
+    try:
+        meta = json.loads((d / "cues.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta = {}
+    settings = record.get("settings") or {}
+    text = ""
+    for f in ("lyrics.txt", "approved-text.txt"):
+        if (d / f).exists():
+            text = (d / f).read_text(encoding="utf-8", errors="replace").strip()
+            break
+    return {"name": name, "file": row["file"], "has_video": row["has_video"], "section": row["section"],
+            "mode": row["mode"], "text": text if row["mode"] == "lyrics" else "",
+            "language": settings.get("language") or meta.get("language"),
+            "format": settings.get("format") or meta.get("video_format"),
+            "caption_mode": settings.get("caption_mode") or meta.get("caption_mode"),
+            "isolate": settings.get("isolate") or meta.get("isolate"),
+            "script": settings.get("script") or meta.get("script"), "quality": settings.get("quality"),
+            "topic_words": ", ".join(settings.get("topic_words") or []) if isinstance(settings.get("topic_words"), list)
+            else settings.get("topic_words") or "",
+            "can_rerun": any(d.glob("input.*")) or any(d.glob("video.*"))}
+
+
+@app.delete("/api/history/{name}")
+def history_delete(name: str):
+    d = _history_dir(name)
+    if isinstance(d, JSONResponse):
+        return d
+    for job_id, job in list(JOBS.items()):
+        ctx = job.get("ctx") or {}
+        if ctx.get("job_dir") and ctx["job_dir"].name == name:
+            if job.get("status") in ("queued", "running"):
+                return JSONResponse({"error": "This job is still running."}, status_code=409)
+            joblog.close_logger(ctx.get("log"))
+            JOBS.pop(job_id, None)
+    history.delete(d)
+    log.info("History: deleted %s", name)
+    return {"deleted": name}
+
+
+@app.post("/api/history/{name}/reveal")
+def history_reveal(name: str):
+    d = _history_dir(name)
+    if isinstance(d, JSONResponse):
+        return d
+    problem_report.safe_open(str(d))
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Report a problem (V4.9). Nothing is sent: a zip in Downloads, then the user's own email app.
+
+@app.post("/api/report")
+async def report_create(request: Request):
+    body = await request.json()
+    job_dir = None
+    if body.get("job"):
+        job_dir = history.job_dir(JOBS_DIR, str(body["job"]))
+        if job_dir is None:
+            return JSONResponse({"error": "That job isn't there any more."}, status_code=404)
+    at = body.get("time")
+    try:
+        at = float(at) if at not in (None, "") else None
+    except (TypeError, ValueError):
+        at = None
+    try:
+        out = problem_report.build(category=str(body.get("category") or "other"),
+                                   description=str(body.get("description") or ""), at=at, job_dir=job_dir,
+                                   include=body.get("include") or {}, version=VERSION)
+    except OSError as e:
+        log.error("Problem report failed: %s", e)
+        return JSONResponse({"error": "Couldn't write the report zip to your Downloads folder."}, status_code=500)
+    _reports[out["name"]] = out["path"]
+    return {**out, "path": joblog.redact(out["path"])}
+
+
+_reports: dict[str, str] = {}  # zip name -> its path (Show zip opens only reports made this run)
+
+
+@app.post("/api/report/open")
+async def report_open(request: Request):
+    """open: "email" (the pre-filled email in the mail app) or "zip" (show it in Finder/Explorer)."""
+    body = await request.json()
+    path = _reports.get(str(body.get("name")))
+    if not path:
+        return JSONResponse({"error": "That report isn't there any more."}, status_code=404)
+    try:
+        if body.get("open") == "email":
+            mailto = str(body.get("mailto") or "")
+            if not mailto.startswith(f"mailto:{problem_report.EMAIL}?"):
+                return JSONResponse({"error": "Not a report email."}, status_code=400)
+            problem_report.safe_open(mailto)
+            log.info("Problem report: opened the email for %s", body.get("name"))
+        else:
+            problem_report.safe_open(path)
+    except (OSError, ValueError) as e:
+        return JSONResponse({"error": f"Couldn't open it ({type(e).__name__})."}, status_code=500)
+    return {"ok": True}
 
 
 app.mount("/", StaticFiles(directory=str(DIST), html=True), name="frontend")

@@ -12,7 +12,7 @@ function fmt(t) {
     onPlayable(false) and plays fallbackSrc, the server's preview copy, once that exists.
     Exposes seekTo(seconds) via ref, like Waveform. */
 const VideoPreview = forwardRef(function VideoPreview(
-  { file, fallbackSrc, cues, format, onTime, onPlayable, processing, onDuration, onPlaying }, ref) {
+  { file, url, name, fallbackSrc, cues, format, onTime, onPlayable, processing, onDuration, onPlaying }, ref) {
   const videoRef = useRef(null);
   const [fileUrl, setFileUrl] = useState(null);
   const [playable, setPlayable] = useState(null);
@@ -20,12 +20,13 @@ const VideoPreview = forwardRef(function VideoPreview(
   const [duration, setDuration] = useState(0);
 
   useEffect(() => {
-    const url = URL.createObjectURL(file);
-    setFileUrl(url);
     setPlayable(null);
     setTime(0);
+    if (!file) { setFileUrl(url || null); return; }  // a job opened from History: the server's copy
+    const url = URL.createObjectURL(file);
+    setFileUrl(url);
     return () => URL.revokeObjectURL(url);
-  }, [file]);
+  }, [file, url]);
 
   function report(ok) {
     setPlayable(ok);
@@ -90,7 +91,7 @@ const VideoPreview = forwardRef(function VideoPreview(
         )}
       </div>
       <div className="player-row">
-        <span className="player-name">{file.name}</span>
+        <span className="player-name">{file ? file.name : name}</span>
         {!cues.length && <span className="video-hint">Subtitles appear on the video once they're generated</span>}
       </div>
     </div>

@@ -28,7 +28,11 @@ const clean = cleanCaption;
 const FOLLOW_PAUSE_MS = 3000;
 const FOLLOW_KEY = "srt-follow-playback";
 const savedFollow = () => { try { return localStorage.getItem(FOLLOW_KEY) !== "off"; } catch { return true; } };
-const flagged = c => c.listen?.status === "flag" && !c.listen.resolved;
+const listenFlag = c => c.listen?.status === "flag" && !c.listen.resolved;
+const scriptFlag = c => c.script?.status === "flag" && !c.script.resolved;
+const flagged = c => listenFlag(c) || scriptFlag(c);
+/** A possible missing caption is covered once a cue overlaps half of it (the user added one). */
+const covered = (m, cues) => cues.some(c => Math.min(c.end, m.end) - Math.max(c.start, m.start) >= (m.end - m.start) / 2);
 
 /** The AI's changes that are still in the text (the word at that position is the AI's word). */
 const liveAi = c => {
@@ -38,7 +42,8 @@ const liveAi = c => {
 
 export default function Review({ jobId, initialCues, edited: initiallyEdited, cap, player, time, duration,
                                  playing, active, onCues, srtName, hasVocals, vocalsLabel,
-                                 captionMode, onCaptionMode, switching, checkWith, checkMessage, listenSummary }) {
+                                 captionMode, onCaptionMode, switching, checkWith, checkMessage, listenSummary,
+                                 jobDir, onReport, missing = [], notFound = [], scriptSummary }) {
   const [hist, setHist] = useState({ past: [], present: initialCues, future: [] });
   const [sel, setSel] = useState(0);
   const [editing, setEditing] = useState(false);
@@ -47,6 +52,8 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
   const [saveNote, setSaveNote] = useState("");  // autosave status
   const [notice, setNotice] = useState("");      // what an action did (re-time, …)
   const [retiming, setRetiming] = useState(false);
+  const dismissKey = `srt-missing-dismissed-${jobDir || jobId}`;
+  const [dismissed, setDismissed] = useState(() => { try { return JSON.parse(localStorage.getItem(dismissKey)) || []; } catch { return []; } });
   const rowRefs = useRef([]);
   const listRef = useRef(null);
   const [follow, setFollow] = useState(savedFollow);
@@ -139,10 +146,43 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
     if (k !== i) return c;
     const next = { ...c, ...patch };
     if (c.listen && ("text" in patch || "start" in patch || "end" in patch)) next.listen = { ...c.listen, resolved: true };
+    if (c.script && ("text" in patch || "start" in patch || "end" in patch)) next.script = { ...c.script, resolved: true };
     if ("text" in patch && clean(patch.text) !== c.text) delete next.unsure;
     return next;
   }), i);
-  const looksRight = i => update(i, { listen: { ...cues[i].listen, resolved: true } });
+  const looksRight = i => update(i, {
+    ...(cues[i].listen ? { listen: { ...cues[i].listen, resolved: true } } : {}),
+    ...(cues[i].script ? { script: { ...cues[i].script, resolved: true } } : {}),
+  });
+  /** Put a "Not found in the audio" line back: in the gap between its neighbours, or at the playhead. */
+  function addBack(line, where) {
+    const text = clean(line.text.replace(/^\s*[^\W\d_][\w.'’\- ]{0,24}?\s*:\s*/u, "")) || clean(line.text);
+    let start = where === "playhead" ? time : (line.gap?.[0] ?? time);
+    const limit = where === "playhead" ? Infinity : (line.gap?.[1] ?? Infinity);
+    const next = cues.find(c => c.start > start + 0.001);
+    const words = text.split(" ").length;
+    let end = Math.min(start + Math.max(1.2, words * 0.4), limit, next ? next.start - 0.001 : Infinity, duration || Infinity);
+    if (end - start < MIN_CUE) end = start + MIN_CUE;
+    const fresh = { start: r3(start), end: r3(end), text, added: line.line };
+    const list = [...cues, fresh].sort((a, b) => a.start - b.start);
+    commit(list, list.indexOf(fresh));
+    setNotice(`Added back line ${line.line} at ${fmt(start)} — check its timing.`);
+  }
+  function addAtGap(m) {
+    const fresh = { start: r3(m.start), end: r3(m.end), text: "New subtitle" };
+    const list = [...cues, fresh].sort((a, b) => a.start - b.start);
+    commit(list, list.indexOf(fresh));
+    setEditing(true);
+  }
+  function dismiss(m) {
+    const next = [...dismissed, `${m.start}`];
+    setDismissed(next);
+    try { localStorage.setItem(dismissKey, JSON.stringify(next)); } catch { /* private window */ }
+  }
+  function jumpTo(t) {
+    player.current?.seek(Math.max(0, t - 0.5));
+    player.current?.play();
+  }
   const dropUnsure = (i, k) => update(i, { unsure: (cues[i].unsure || []).filter(x => x !== k) });
   /** Jump to a cue a little before it starts, and play (the listening check's Listen button). */
   function listen(i) {
@@ -356,6 +396,11 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
   const fixedCount = cues.filter(c => c.listen?.status === "fixed").length;
   const unsureCount = cues.reduce((n, c) => n + (c.unsure || []).length, 0);
   const okCount = cues.filter(c => c.listen && !flagged(c) && c.listen.status !== "fixed").length;
+  const scriptToCheck = cues.filter(scriptFlag).length;
+  const recovered = scriptSummary?.recovered || 0;
+  const notAdded = notFound.filter(l => !cues.some(c => c.added === l.line));
+  const openMissing = missing.filter(m => !dismissed.includes(`${m.start}`) && !covered(m, cues));
+  const nothingLeft = !toCheck && !unsureCount && !openMissing.length;
   const nextToCheck = () => {
     const after = cues.findIndex((c, k) => k > sel && flagged(c));
     const k = after >= 0 ? after : cues.findIndex(flagged);
@@ -443,7 +488,17 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
                     <span onDoubleClick={() => { setSel(i); setEditing(true); }}>{cueText(c, i)}</span>
                   )}
                   {bad.length > 0 && <small className="rcue-bad">{bad.map(p => p.text).join(" · ")}</small>}
-                  {check && (
+                  {scriptFlag(c) && (
+                    <small className="rcue-check" data-testid="script-flag" onClick={e => e.stopPropagation()}>
+                      <b>{c.script.reason || "Script line not confidently found — check it"}</b>
+                      <button onClick={() => listen(i)} data-testid="script-jump" title="Jump here and listen">▶ Listen</button>
+                      <button onClick={() => looksRight(i)} data-testid="script-ok">Looks right</button>
+                    </small>
+                  )}
+                  {c.script?.status === "recovered" && (
+                    <small className="rcue-fixed" data-testid="script-recovered">Script line recovered: the aligner wasn't sure, the re-listen found it here</small>
+                  )}
+                  {listenFlag(c) && (
                     <small className="rcue-check" data-testid="listen-flag" onClick={e => e.stopPropagation()}>
                       <b>Check this</b> · {c.listen.reasons.join(" · ")}
                       <button onClick={() => listen(i)} data-testid="listen-jump" title="Jump here and listen">▶ Listen</button>
@@ -490,7 +545,43 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
           </span>
           {toCheck > 0
             ? <button className="loadtxt" onClick={nextToCheck} data-testid="listen-next">Next to check</button>
-            : !unsureCount && <span className="verified-badge" data-testid="verified">Verified</span>}
+            : nothingLeft && <span className="verified-badge" data-testid="verified">Verified</span>}
+        </div>
+      )}
+      {(recovered > 0 || scriptToCheck > 0 || notFound.length > 0 || missing.length > 0) && (
+        <p className="stage-note script-summary" data-testid="script-summary">
+          {(recovered || scriptToCheck || notFound.length) ? <>Script lines: {recovered} recovered, {scriptToCheck} to check, {notFound.length} not found in the audio</> : null}
+          {(recovered || scriptToCheck || notFound.length) && missing.length ? " · " : null}
+          {missing.length ? <>{plural(openMissing.length, "possible missing caption", "possible missing captions")}</> : null}
+        </p>
+      )}
+      {openMissing.length > 0 && (
+        <div className="missing-list" data-testid="missing-list">
+          {openMissing.map(m => (
+            <div key={m.start} className="missing-row" data-testid="missing-row" onClick={() => jumpTo(m.start)}>
+              <b>Possible missing caption</b> · speech at {fmtMs(m.start)}–{fmtMs(m.end)} with no caption
+              <span className="missing-tools" onClick={e => e.stopPropagation()}>
+                <button onClick={() => jumpTo(m.start)} data-testid="missing-jump">▶ Listen</button>
+                <button onClick={() => addAtGap(m)} data-testid="missing-add">+ Caption here</button>
+                <button onClick={() => dismiss(m)} data-testid="missing-dismiss">Nothing missing</button>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {notAdded.length > 0 && (
+        <div className="notfound-list" data-testid="notfound-list">
+          {notAdded.map(l => (
+            <div key={l.line} className="notfound-row" data-testid="notfound-row">
+              <span><b>Not found in the audio</b> · line {l.line}: “{l.text}”
+                <small className="muted"> — not in the SRT unless you add it back</small></span>
+              <span className="missing-tools">
+                <button onClick={() => addBack(l, "gap")} data-testid="addback"
+                  title={l.gap ? `Between ${fmt(l.gap[0])} and ${fmt(l.gap[1])}` : "At the playhead"}>Add it back</button>
+                <button onClick={() => addBack(l, "playhead")} data-testid="addback-playhead">At the playhead</button>
+              </span>
+            </div>
+          ))}
         </div>
       )}
       {unsureCount > 0 && (
@@ -506,7 +597,7 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
         <a className="dl-primary" href={`/api/jobs/${jobId}/srt`} onClick={download} data-testid="dl-srt">
           <span>
             <b>Download SRT {edited && <span className="edited-badge" data-testid="edited-badge">Edited</span>}
-              {heardAny && !toCheck && !unsureCount && <span className="edited-badge verified" data-testid="verified-badge">Verified</span>}</b>
+              {heardAny && nothingLeft && <span className="edited-badge verified" data-testid="verified-badge">Verified</span>}</b>
             <span>{srtName} · {cues.length} cues · {captionMode === "word" ? "word by word" : "line by line"}</span>
           </span>
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"><path d="M8 2v9M4.5 7.5 8 11l3.5-3.5" /><path d="M2.5 13.5h11" /></svg>
@@ -514,6 +605,10 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
         <div className="dl-side">
           <a className="dl-secondary" href={`/api/jobs/${jobId}/srt?original=1`} data-testid="dl-original">Download original</a>
           {hasVocals && <a className="dl-secondary" href={`/api/jobs/${jobId}/vocals`}>{vocalsLabel}</a>}
+          {onReport && jobDir && (
+            <button className="dl-secondary linklike" data-testid="review-report"
+              onClick={() => onReport({ job: jobDir, label: srtName, time })}>Report a problem</button>
+          )}
         </div>
       </div>
       {notice && <p className="stage-note review-save" data-testid="notice">{notice}</p>}

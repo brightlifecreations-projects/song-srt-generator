@@ -26,3 +26,5 @@ number-exceptions.txt
 /wheels/
 # Release reports written for Aman, kept local
 REPORT-*.md
+logs/
+app-settings.json

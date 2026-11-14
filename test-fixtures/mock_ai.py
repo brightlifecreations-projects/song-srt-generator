@@ -53,7 +53,8 @@ class Handler(BaseHTTPRequestHandler):
             content = json.dumps(final_check_answer(json.loads(user), mode), ensure_ascii=False)
         else:  # AI polish of a draft: same lines back
             content = json.dumps({"lines": [line["text"] for line in json.loads(user)["lines"]]}, ensure_ascii=False)
-        self.answer({"choices": [{"message": {"content": content}}]})
+        self.answer({"choices": [{"message": {"content": content}}],
+                     "usage": {"prompt_tokens": len(user) // 4, "completion_tokens": len(content) // 4}})
 
     def answer(self, data):
         raw = json.dumps(data).encode()

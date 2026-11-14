@@ -345,7 +345,7 @@ function useAiPolish(active) {
 
 /** One section's whole workbench (Song, Drama or Reels/YouTube). Every tab stays mounted, so
     each keeps its own file, draft and result; its settings are remembered per section. */
-export default function Workspace({ section, preset, meta, active }) {
+export default function Workspace({ section, preset, meta, active, request, onReport }) {
   const copy = SECTION_COPY[section];
   const [mode, setModeState] = useTabSetting(section, "mode", "lyrics");
   const [format, setFormat] = useTabSetting(section, "format", preset.format);
@@ -386,6 +386,10 @@ export default function Workspace({ section, preset, meta, active }) {
   const [reviewCues, setReviewCues] = useState(null);
   const [reviewKey, setReviewKey] = useState(0);
   const [restoredAudio, setRestoredAudio] = useState(null);
+  const [restoredVideo, setRestoredVideo] = useState(null);
+  // Re-run from History (V4.9): the earlier job's media stands in for a picked file.
+  const [attached, setAttached] = useState(null); // {job, name, has_video}
+  const [autoStart, setAutoStart] = useState(0);
 
   const playerRef = useRef(null);
   const audioInput = useRef(null);
@@ -395,7 +399,8 @@ export default function Workspace({ section, preset, meta, active }) {
   const working = phase === "working";
   const transcribing = mode === "transcribe";
   const elapsed = useElapsed(working);
-  const isVideo = file && VIDEO_EXT.test(file.name);
+  const isVideo = file ? VIDEO_EXT.test(file.name) : !!(attached ? attached.has_video : restoredVideo);
+  const source = file || attached;  // what Generate/Transcribe will send
   const languages = meta?.languages || [];
   const scripts = meta?.scripts || [];
   const known = code => languages.some(l => l.code === code);
@@ -432,19 +437,54 @@ export default function Workspace({ section, preset, meta, active }) {
     }
   }
 
+  /** Show a finished job the server has (a reopened page, or History → Open) in the Review panel. */
+  function restore(id, fromHistory) {
+    return fetch(`/api/jobs/${id}`).then(r => (r.ok ? r.json() : null)).then(s => {
+      if (!s || s.status !== "done" || (file && !fromHistory)) return;
+      clearInterval(pollRef.current);
+      if (fromHistory) { setFile(null); setAttached(null); setDraft(null); setMarks([]); setLyrics(""); }
+      setJob({ ...s, id });
+      setModeState(s.mode === "transcribe" ? "transcribe" : "lyrics");
+      if (s.caption_mode) setCaptionMode(s.caption_mode);
+      if (s.video_format) setFormat(s.video_format);
+      setRestoredAudio(`/api/jobs/${id}/audio`);
+      setRestoredVideo(s.has_video ? `/api/jobs/${id}/video` : null);
+      setVideoPlayable(null);
+      setReviewCues(null);
+      setPhase("done");
+      setReviewKey(k => k + 1);
+      store(`srt-${section}-review`, id);
+    }).catch(() => {});
+  }
+
   // Reopened page: bring back the last reviewed job if the app still has it.
   useEffect(() => {
     const id = stored(`srt-${section}-review`, "");
-    if (!id) return;
-    fetch(`/api/jobs/${id}`).then(r => (r.ok ? r.json() : null)).then(s => {
-      if (!s || s.status !== "done" || file) return;
-      setJob({ ...s, id });
-      setModeState(s.mode === "transcribe" ? "transcribe" : "lyrics");
-      setRestoredAudio(`/api/jobs/${id}/audio`);
-      setPhase("done");
-      setReviewKey(k => k + 1);
-    }).catch(() => {});
+    if (id) restore(id, false);
   }, []);
+
+  // History → Open, or History → Re-run (V4.9).
+  useEffect(() => {
+    if (!request || working) return;
+    if (request.jobId) { restore(request.jobId, true); return; }
+    const s = request.rerun;
+    if (!s) return;
+    resetRun();
+    setFile(null);
+    setFileError("");
+    setAttached({ job: s.name, name: s.file, has_video: s.has_video });
+    setVideoPlayable(null);
+    setModeState(s.mode === "transcribe" ? "transcribe" : "lyrics");
+    if (s.language) (s.mode === "transcribe" ? setTranscribeLanguage : setLyricsLanguage)(s.language);
+    if (s.format) setFormat(s.format);
+    if (s.caption_mode) setCaptionMode(s.caption_mode);
+    if (s.isolate) setIsolate(s.isolate);
+    if (s.script) setScriptPick(s.script);
+    if (s.quality) setQuality(s.quality);
+    setTopicWords(s.topic_words || "");
+    setLyrics(s.mode === "lyrics" ? s.text || "" : "");
+    if (request.start) setAutoStart(n => n + 1);
+  }, [request?.n]);
 
   function resetRun() {
     clearInterval(pollRef.current);
@@ -454,6 +494,7 @@ export default function Workspace({ section, preset, meta, active }) {
     setMarks([]);
     setReviewCues(null);
     setRestoredAudio(null);
+    setRestoredVideo(null);
   }
 
   function setMode(m) {
@@ -508,13 +549,13 @@ export default function Workspace({ section, preset, meta, active }) {
   }
 
   // A video the web view can't play (MKV, some codecs) gets a small preview copy made on the server.
-  const fileFields = () => ({
+  const fileFields = () => (file ? {
     audio: file, section, isolate,
     video_preview: isVideo && videoPlayable !== true ? "true" : undefined,
-  });
+  } : { from_job: attached?.job, section, isolate });
 
   function generate() {
-    if (!file || !lyrics.trim() || working) return;
+    if (!source || !lyrics.trim() || working) return;
     setJob(null);
     submit("/api/jobs", {
       ...fileFields(), lyrics, strip_tags: stripTags, video_format: format, language, ...captionFields(),
@@ -522,7 +563,7 @@ export default function Workspace({ section, preset, meta, active }) {
   }
 
   function transcribe() {
-    if (!file || working) return;
+    if (!source || working) return;
     setJob(null);
     setDraft(null);
     setMarks([]);
@@ -600,6 +641,7 @@ export default function Workspace({ section, preset, meta, active }) {
     }
     setFileError("");
     resetRun();
+    setAttached(null);
     setFile(f || null);
     setVideoPlayable(null);
     if (transcribing) setLyrics("");
@@ -666,13 +708,19 @@ export default function Workspace({ section, preset, meta, active }) {
   const cues = phase === "done" ? reviewCues || job?.edited_cues || job?.cues || [] : [];
   const activeCue = cues.findIndex(c => playTime >= c.start && playTime < c.end);
   const hasDraft = transcribing && draft && job?.id;
-  const ready = file && !working && (transcribing ? (!hasDraft || lyrics.trim()) : lyrics.trim());
+  const ready = source && !working && (transcribing ? (!hasDraft || lyrics.trim()) : lyrics.trim());
+  // Re-run now (History): start once the settings above have been applied.
+  useEffect(() => {
+    if (!autoStart || !attached) return;
+    if (transcribing) transcribe(); else if (lyrics.trim()) generate();
+  }, [autoStart]);
   const totalSeconds = Object.entries(job?.timings || {})
     .filter(([k]) => k !== "outputs_seconds")
     .reduce((sum, [, v]) => sum + v, 0);
   // Audio files show a waveform. Videos play themselves, or the server's preview copy when the
   // web view can't decode them.
-  const waveSource = !isVideo ? file || restoredAudio : null;
+  const attachedMedia = attached ? `/api/history/${attached.job}/media` : null;
+  const waveSource = !isVideo ? file || attachedMedia || restoredAudio : null;
   const videoFallback = isVideo && videoPlayable === false && job?.has_preview && job?.id
     ? `/api/jobs/${job.id}/preview` : null;
   const isolating = isolate === "on" || (isolate === "auto" && job?.music_detected);
@@ -713,7 +761,7 @@ export default function Workspace({ section, preset, meta, active }) {
 
           <section className="field">
             <h2 className="field-label">Audio or video</h2>
-            {!file ? (
+            {!source ? (
               <button className={`dropzone${drag ? " drag" : ""}`} onClick={() => audioInput.current.click()}>
                 <div className="dropzone-icon">
                   <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><path d="M7 11V2M3.5 5.5 7 2l3.5 3.5" /><path d="M1.5 12.5h11" /></svg>
@@ -724,8 +772,8 @@ export default function Workspace({ section, preset, meta, active }) {
             ) : (
               <div className={`filechip${drag ? " drag" : ""}`}>
                 <div style={{ minWidth: 0 }}>
-                  <div className="filechip-name">{file.name}</div>
-                  <div className="filechip-meta">{isVideo ? "Video · " : ""}{(file.size / 1048576).toFixed(1)} MB · drop another file to replace it</div>
+                  <div className="filechip-name" data-testid="file-name">{source.name}</div>
+                  <div className="filechip-meta">{isVideo ? "Video · " : ""}{file ? `${(file.size / 1048576).toFixed(1)} MB` : "from History"} · drop another file to replace it</div>
                 </div>
                 <button onClick={() => audioInput.current.click()} disabled={working}>Replace</button>
               </div>
@@ -958,11 +1006,12 @@ export default function Workspace({ section, preset, meta, active }) {
         {/* ------------------------- output (sticky) ------------------------- */}
         <div className={`stagecol${phase === "done" ? " reviewing" : ""}`} ref={stageRef}>
           {isVideo ? (
-            <VideoPreview ref={playerRef} file={file} fallbackSrc={videoFallback} cues={cues}
+            <VideoPreview ref={playerRef} file={file} url={file ? null : attachedMedia || restoredVideo}
+              name={source ? source.name : job?.source_file || "Video"} fallbackSrc={videoFallback} cues={cues}
               format={format} onTime={setPlayTime} onPlayable={setVideoPlayable}
               processing={working} onDuration={setDuration} onPlaying={setPlaying} />
           ) : waveSource ? (
-            <Waveform ref={playerRef} source={waveSource} name={file ? file.name : job?.job_dir || "Job audio"}
+            <Waveform ref={playerRef} source={waveSource} name={source ? source.name : job?.source_file || job?.job_dir || "Job audio"}
               scanning={working && stageIdx === 0 && isolating} onTime={setPlayTime}
               subtitle={phase === "done" ? (cues[activeCue]?.text || "") : undefined}
               onDuration={setDuration} onPlaying={setPlaying} />
@@ -1048,11 +1097,14 @@ export default function Workspace({ section, preset, meta, active }) {
                   </p>
                 )}
 
-                <Review key={`${job.id}-${reviewKey}`} jobId={job.id}
+                <Review key={`${job.id}-${reviewKey}`} jobId={job.id} jobDir={job.job_dir} onReport={onReport}
+                  missing={job.missing || []} notFound={job.not_found || []} scriptSummary={job.script_summary}
                   initialCues={(job.edited_cues || job.cues || []).map(c => ({ start: c.start, end: c.end, text: c.text,
                                                                                ...(c.ai ? { ai: c.ai } : {}),
                                                                                ...(c.unsure ? { unsure: c.unsure } : {}),
-                                                                               ...(c.listen ? { listen: c.listen } : {}) }))}
+                                                                               ...(c.listen ? { listen: c.listen } : {}),
+                                                                               ...(c.script ? { script: c.script } : {}),
+                                                                               ...(c.added ? { added: c.added } : {}) }))}
                   captionMode={job.caption_mode || capMode} onCaptionMode={switchCaptions} switching={switching}
                   checkWith={job.check_with} listenSummary={job.listen_summary}
                   edited={!!job.edited} cap={job.max_chars} player={playerRef} time={playTime}

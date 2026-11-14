@@ -22,17 +22,18 @@ import math
 import os
 import re
 import shutil
-import subprocess
 import sys
 import time
 import traceback
 import unicodedata
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 import captions
 import config
 import corrections
+import joblog
 
 ROOT = Path(__file__).parent
 # Writable data (jobs, models, uploads). Defaults to the app folder; the macOS .app
@@ -103,11 +104,9 @@ def is_video(path: Path) -> bool:
 def probe_duration(audio_path: Path) -> float:
     """Return audio duration in seconds via ffprobe."""
     try:
-        out = subprocess.run(
+        out = joblog.run(
             [FFPROBE, "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
-        )
+             "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)], what="duration", timeout=60)
     except FileNotFoundError:
         raise PipelineError(
             "ffmpeg isn't installed or isn't on PATH. Re-run the setup guide (CLAUDE.md / README)."
@@ -119,11 +118,9 @@ def probe_duration(audio_path: Path) -> float:
 
 
 def _has_audio_stream(path: Path) -> bool:
-    out = subprocess.run(
+    out = joblog.run(
         [FFPROBE, "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
-         "-of", "csv=p=0", str(path)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
-    )
+         "-of", "csv=p=0", str(path)], what="audio stream check", timeout=60)
     return bool(out.stdout.strip())
 
 
@@ -192,11 +189,9 @@ def preprocess_lyrics(raw_text: str, strip_tags: bool = True) -> tuple[list[str]
 
 def extract_audio(video_path: Path, out_path: Path) -> Path:
     """Write the video's first audio track as 44.1 kHz stereo WAV (what the separator expects)."""
-    proc = subprocess.run(
+    proc = joblog.run(
         [FFMPEG, "-y", "-v", "error", "-i", str(video_path), "-map", "0:a:0", "-vn",
-         "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", str(out_path)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
+         "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", str(out_path)], what="extract audio")
     if proc.returncode != 0 or not out_path.exists():
         raise PipelineError(
             "Couldn't extract the audio from this video. Try exporting it again as MP4, "
@@ -208,13 +203,38 @@ def extract_audio(video_path: Path, out_path: Path) -> Path:
 def make_preview(video_path: Path, out_path: Path) -> Path | None:
     """A small H.264/AAC copy for the subtitle preview, for videos the web view can't play
     (MKV, some codecs). At most 720 px tall. Returns None if ffmpeg can't make one."""
-    proc = subprocess.run(
+    proc = joblog.run(
         [FFMPEG, "-y", "-v", "error", "-i", str(video_path), "-map", "0:v:0", "-map", "0:a:0",
          "-vf", "scale=-2:'min(720,ih)'", "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
          "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
-         str(out_path)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
+         str(out_path)], what="preview copy")
+    return out_path if proc.returncode == 0 and out_path.exists() else None
+
+
+def probe_input(path: Path) -> dict:
+    """The input file for the job log: name, size, duration, container, and each stream's codec."""
+    info = {"name": path.name, "size_bytes": path.stat().st_size if path.exists() else None}
+    proc = joblog.run([FFPROBE, "-v", "error", "-show_entries",
+                       "format=format_name,duration,bit_rate:stream=codec_type,codec_name,sample_rate,channels,"
+                       "width,height,r_frame_rate", "-of", "json", str(path)], what="input details", timeout=60)
+    try:
+        data = json.loads(proc.stdout or "{}")
+    except ValueError:
+        data = {}
+    fmt = data.get("format", {})
+    info.update(container=fmt.get("format_name"), duration=float(fmt["duration"]) if fmt.get("duration") else None,
+                bit_rate=fmt.get("bit_rate"),
+                streams=[{k: v for k, v in st.items() if v not in (None, "")} for st in data.get("streams", [])])
+    info["has_video"] = any(st.get("codec_type") == "video" and st.get("codec_name") not in ("mjpeg", "png")
+                            for st in data.get("streams", []))
+    return info
+
+
+def make_thumbnail(video_path: Path, out_path: Path, duration: float) -> Path | None:
+    """A small JPEG from the video for the History page."""
+    at = min(1.0, max(0.0, duration / 3))
+    proc = joblog.run([FFMPEG, "-y", "-v", "error", "-ss", f"{at:.2f}", "-i", str(video_path), "-frames:v", "1",
+                       "-vf", "scale=-2:120", "-q:v", "5", str(out_path)], what="thumbnail")
     return out_path if proc.returncode == 0 and out_path.exists() else None
 
 
@@ -225,8 +245,7 @@ MUSIC_CHECK_SECONDS = 30.0
 
 
 def _mean_volume_db(args: list[str]) -> float:
-    proc = subprocess.run([FFMPEG, "-v", "info", *args, "-f", "null", "-"],
-                          capture_output=True, text=True, encoding="utf-8", errors="replace")
+    proc = joblog.run([FFMPEG, "-v", "info", *args, "-f", "null", "-"], what="loudness")
     match = re.search(r"mean_volume: (-?[\d.]+|-inf) dB", proc.stderr)
     return float(match.group(1)) if match else -91.0
 
@@ -240,10 +259,9 @@ def detect_music(audio_path: Path, duration: float, job_dir: Path, log: logging.
     whole = duration <= MUSIC_CHECK_SECONDS + 5
     excerpt = check_dir / "excerpt.wav"
     start = 0.0 if whole else duration / 2 - MUSIC_CHECK_SECONDS / 2
-    subprocess.run([FFMPEG, "-y", "-v", "error", "-ss", f"{start:.2f}", "-i", str(audio_path),
-                    *([] if whole else ["-t", str(MUSIC_CHECK_SECONDS)]),
-                    "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", str(excerpt)],
-                   capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+    joblog.run([FFMPEG, "-y", "-v", "error", "-ss", f"{start:.2f}", "-i", str(audio_path),
+                *([] if whole else ["-t", str(MUSIC_CHECK_SECONDS)]),
+                "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", str(excerpt)], what="music check excerpt", check=True)
     vocals = separate_vocals(excerpt, check_dir, log)
     voice_db = _mean_volume_db(["-i", str(vocals), "-af", "volumedetect"])
     background_db = _mean_volume_db([
@@ -306,6 +324,13 @@ def _run_separator(separator_cls, audio_path: Path, job_dir: Path) -> Path:
     global _separator, _separator_key
     key = (separator_engine(), config.SEPARATOR_MODEL)
     if _separator is None or _separator_key != key:
+        if _separator is not None:
+            joblog.model_event("unload", f"{_separator_key[1]} ({_separator_key[0]})")
+        model_file = MODELS_DIR / config.SEPARATOR_MODEL
+        had_model = model_file.exists()
+        joblog.model_event("cache miss", f"{config.SEPARATOR_MODEL} ({key[0]})", path=str(model_file),
+                           on_disk=had_model)
+        t0 = time.perf_counter()
         _separator = separator_cls(
             log_level=logging.INFO,
             model_file_dir=str(MODELS_DIR),
@@ -315,11 +340,27 @@ def _run_separator(separator_cls, audio_path: Path, job_dir: Path) -> Path:
         )
         _separator.load_model(model_filename=config.SEPARATOR_MODEL)
         _separator_key = key
+        if not had_model:
+            size = sum(f.stat().st_size for f in MODELS_DIR.glob("*") if f.is_file())
+            joblog.model_event("download", config.SEPARATOR_MODEL, folder=str(MODELS_DIR),
+                               models_folder_mb=round(size / 2**20), seconds=round(time.perf_counter() - t0, 2))
+        joblog.model_event("load", f"{config.SEPARATOR_MODEL} ({key[0]})", seconds=round(time.perf_counter() - t0, 2))
+    else:
+        joblog.model_event("cache hit", f"{config.SEPARATOR_MODEL} ({key[0]})")
     _separator.output_dir = str(job_dir)
     if getattr(_separator, "model_instance", None) is not None:
         _separator.model_instance.output_dir = str(job_dir)
-    _separator.separate(str(audio_path), custom_output_names={"Vocals": "vocals"})
-    return _find_vocals_output(job_dir)
+    t0 = time.perf_counter()
+    cmd = f"{key[0]} separator {config.SEPARATOR_MODEL}: {audio_path} -> {job_dir / 'vocals.wav'}"
+    try:
+        _separator.separate(str(audio_path), custom_output_names={"Vocals": "vocals"})
+        out = _find_vocals_output(job_dir)
+    except Exception as e:
+        joblog.external("Voice separation", cmd, time.perf_counter() - t0, False, f"{type(e).__name__}: {e}")
+        raise
+    joblog.external("Voice separation", cmd, time.perf_counter() - t0, True,
+                    f"vocals.wav {out.stat().st_size // 1024} KB")
+    return out
 
 
 def _separate_mlx(audio_path: Path, job_dir: Path, log: logging.Logger) -> Path:
@@ -357,7 +398,17 @@ def _load_align_model():
             import torch
 
             device = "cuda" if torch.cuda.is_available() else "cpu"
+        name = f"faster-whisper-{config.MODEL_SIZE}"
+        cached = (MODELS_DIR / "hf" / "hub" / f"models--Systran--{name}").is_dir()
+        joblog.model_event("cache miss", name, device=device, on_disk=cached)
+        t0 = time.perf_counter()
         _align_model = stable_whisper.load_faster_whisper(config.MODEL_SIZE, device=device)
+        if not cached:
+            joblog.model_event("download", name, url=f"https://huggingface.co/Systran/{name}",
+                               seconds=round(time.perf_counter() - t0, 2))
+        joblog.model_event("load", name, device=device, seconds=round(time.perf_counter() - t0, 2))
+    else:
+        joblog.model_event("cache hit", f"faster-whisper-{config.MODEL_SIZE}")
     return _align_model
 
 
@@ -436,10 +487,8 @@ SILENCE_DB = -60.0
 
 
 def _max_volume_db(audio_path: Path) -> float:
-    proc = subprocess.run(
-        [FFMPEG, "-v", "info", "-i", str(audio_path), "-af", "volumedetect", "-f", "null", "-"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
+    proc = joblog.run(
+        [FFMPEG, "-v", "info", "-i", str(audio_path), "-af", "volumedetect", "-f", "null", "-"], what="silence check")
     match = re.search(r"max_volume: (-?[\d.]+) dB", proc.stderr)
     return float(match.group(1)) if match else 0.0  # unknown: assume there's sound
 
@@ -559,7 +608,11 @@ def transcribe_audio(audio_path: Path, language: str | None, log: logging.Logger
             log.error("Hinglish model raised:\n%s", traceback.format_exc())
             raise PipelineError(TRANSCRIBE_FAILURE_MESSAGE)
         else:
-            lines, _ = corrections.apply("\n".join(apex["lines"]), spellings)
+            for w in apex["words"]:
+                log.debug("Hinglish model word %s@%.3f-%.3f (%.2f)%s", w.get("word"), w.get("start", 0), w.get("end", 0),
+                          w.get("probability") or w.get("prob") or 0, f" [{w['flag']}]" if w.get("flag") else "")
+            lines, hits = corrections.apply("\n".join(apex["lines"]), spellings)
+            _log_replacements(log, "Spelling table", hits)
             return {**apex, "lines": lines.split("\n"), "language": "hi", "transcribe_language": "en",
                     "task": "transcribe", "segments": [], "urdu_converted": False, "engine": "apex"}
     model = _load_align_model()
@@ -579,6 +632,12 @@ def transcribe_audio(audio_path: Path, language: str | None, log: logging.Logger
     except Exception:
         log.error("Transcription raised:\n%s", traceback.format_exc())
         raise PipelineError(TRANSCRIBE_FAILURE_MESSAGE)
+    log.info("Whisper detected language: %s", _language_code(result.language))
+    for seg in result.segments:  # the raw transcription, with timestamps and word probabilities
+        log.debug("Whisper segment %.3f–%.3f (avg logprob %s, no-speech %s): %s | %s", float(seg.start), float(seg.end),
+                  getattr(seg, "avg_logprob", None), getattr(seg, "no_speech_prob", None), seg.text.strip(),
+                  " ".join(f"{w.word.strip()}@{float(w.start):.3f}-{float(w.end):.3f}({float(w.probability or 0):.2f})"
+                           for w in (seg.words or [])))
     segments = [(float(seg.start), float(seg.end), seg.text.strip())
                 for seg in result.segments if seg.text.strip()]
     if not segments:
@@ -588,16 +647,32 @@ def transcribe_audio(audio_path: Path, language: str | None, log: logging.Logger
     if script == "hinglish":
         import transliterate
         converted = transliterate.has_urdu("\n".join(lines))
+        before = lines
         lines = transliterate.to_hinglish("\n".join(lines))
-        lines = corrections.apply(lines, spellings)[0].split("\n")
+        for a, b in zip(before, lines.split("\n")):
+            log.debug("Transliterated: %s -> %s", a, b)
+        lines, hits = corrections.apply(lines, spellings)
+        _log_replacements(log, "Spelling table", hits)
+        lines = lines.split("\n")
     elif script == "devanagari":
         import transliterate
         converted = transliterate.has_urdu("\n".join(lines))
+        before = lines
         lines = transliterate.to_devanagari("\n".join(lines)).split("\n")
+        for a, b in zip(before, lines):
+            if a != b:
+                log.debug("Transliterated: %s -> %s", a, b)
     return {"lines": lines, "language": _language_code(result.language), "transcribe_language": code,
             "task": task, "segments": segments, "urdu_converted": bool(converted),
             "engine": "transliterate" if script == "hinglish" else "whisper",
             "fallback_reason": fallback_reason}
+
+
+def _log_replacements(log: logging.Logger, table: str, hits: list[dict]):
+    for h in hits:
+        log.debug("%s replacement: %s -> %s%s", table, h.get("original"), h.get("replacement"),
+                  f" (line {h['line'] + 1})" if isinstance(h.get("line"), int) else "")
+    log.info("%s: %d replacement(s)", table, len(hits))
 
 
 def _latin_share(text: str) -> float:
@@ -728,10 +803,7 @@ def export_stem(vocals_wav: Path, job_dir: Path) -> Path:
     if config.STEM_FORMAT == "wav":
         return vocals_wav
     out = job_dir / "vocals.mp3"
-    proc = subprocess.run(
-        [FFMPEG, "-y", "-i", str(vocals_wav), "-b:a", "320k", str(out)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
+    proc = joblog.run([FFMPEG, "-y", "-i", str(vocals_wav), "-b:a", "320k", str(out)], what="vocal stem mp3")
     if proc.returncode != 0 or not out.exists():
         return vocals_wav  # WAV always exists; fall back rather than fail the job
     return out
@@ -759,13 +831,7 @@ def _make_job_dir(audio_path: Path) -> Path:
 
 
 def _job_logger(job_dir: Path) -> logging.Logger:
-    log = logging.getLogger(f"job.{job_dir.name}")
-    log.setLevel(logging.INFO)
-    log.handlers.clear()
-    handler = logging.FileHandler(job_dir / "log.txt", encoding="utf-8")
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    log.addHandler(handler)
-    return log
+    return joblog.job_logger(job_dir)
 
 
 ISOLATE_TITLES = {"song": "Isolate vocals", "drama": "Isolate dialogue", "reels": "Isolate voice"}
@@ -811,57 +877,98 @@ def _unexpected(log: logging.Logger, job_dir: Path):
     )
 
 
+KEEP_VIDEO_BYTES = 1024 ** 3  # videos up to 1 GB are kept in the job folder for History (V4.9)
+
+
 def start_job(audio_path, section: str = "song", report=lambda key, msg: None,
-              isolate: str | None = None, video_preview: bool = False) -> dict:
-    """Validate, create the job folder, get the audio out of a video, and isolate the voice
+              isolate: str | None = None, video_preview: bool = False, settings: dict | None = None) -> dict:
+    """Create the job folder, validate, get the audio out of a video, and isolate the voice
     (isolate "on", or "auto" when background music is detected). Returns the job context
     the later stages work from.
 
     video_preview: also keep a small playable copy of the video (preview.mp4), for videos
-    the UI's web view can't play itself."""
+    the UI's web view can't play itself. settings: the job's choices, for job.json.
+    The job folder exists before the file is checked (V4.9), so a file that can't be read still
+    leaves a log for a problem report."""
     audio_path = Path(audio_path)
     section = clean_section(section)
     isolate = clean_isolate(isolate, section)
-    duration, duration_warning = validate_audio(audio_path)
-
+    joblog.bind(None, None)
     job_dir = _make_job_dir(audio_path)
     log = _job_logger(job_dir)
-    log.info("Input: %s (%.1fs), section=%s, isolate=%s", audio_path.name, duration, section, isolate)
+    record = joblog.Record(job_dir, log)
+    joblog.bind(log, record)
+    env = record.data["environment"]
+    log.info("SRT Generator %s on %s (%s), Python %s, %s", env["app_version"], env["os"], env["cpu"], env["python"],
+             env["gpu"])
+    log.info("Free disk %s MB, memory %s", env["disk_free_mb"], env["memory"])
+    log.debug("Packages: %s", joblog.dumps(env["packages"]))
+    log.debug("Models: %s", joblog.dumps(env["models"]))
+    record.update("settings", {"section": section, "isolate": isolate, "video_preview": video_preview,
+                               **(settings or {})})
+    log.info("Settings: %s", joblog.dumps(record.data["settings"]))
     ctx = {
         "source_file": audio_path.name, "stem": audio_path.stem, "job_dir": job_dir,
-        "log": log, "duration": duration, "section": section, "isolate": isolate,
-        "music_detected": None, "preview_path": None,
-        "warnings": [duration_warning] if duration_warning else [], "timings": {},
-        "vocals_path": None, "detected_language": None,
+        "log": log, "record": record, "duration": 0.0, "section": section, "isolate": isolate,
+        "music_detected": None, "preview_path": None, "video_path": None, "thumb_path": None,
+        "warnings": [], "timings": {}, "vocals_path": None, "detected_language": None,
     }
-    if duration_warning:
-        log.warning(duration_warning)
-
     try:
+        with record.step("validate", file=audio_path.name) as step:
+            duration, duration_warning = validate_audio(audio_path)
+            record.set("input", probe_input(audio_path))
+            step["outputs"] = {"duration": round(duration, 3), "warning": duration_warning}
+        log.info("Input: %s (%.1fs), section=%s, isolate=%s; %s", audio_path.name, duration, section, isolate,
+                 joblog.dumps(record.data["input"]))
+        ctx["duration"] = duration
+        if duration_warning:
+            ctx["warnings"].append(duration_warning)
+            log.warning(duration_warning)
+            record.warn(duration_warning)
         t0 = time.perf_counter()
         if is_video(audio_path):
-            # Keep only the audio: the video can be gigabytes and isn't needed again.
-            report("prepare", "Step 1 — extracting the audio from the video…")
-            input_audio = extract_audio(audio_path, job_dir / "input.wav")
+            with record.step("extract audio", video=audio_path.name) as step:
+                report("prepare", "Step 1 — extracting the audio from the video…")
+                input_audio = extract_audio(audio_path, job_dir / "input.wav")
+                ctx["thumb_path"] = make_thumbnail(audio_path, job_dir / "thumb.jpg", duration)
+                step["outputs"] = {"audio": input_audio.name, "bytes": input_audio.stat().st_size,
+                                   "thumbnail": bool(ctx["thumb_path"])}
             log.info("Extracted audio from %s", audio_path.name)
             if video_preview:
-                report("prepare", "Step 1 — making a preview copy of the video…")
-                ctx["preview_path"] = make_preview(audio_path, job_dir / "preview.mp4")
+                with record.step("preview copy") as step:
+                    report("prepare", "Step 1 — making a preview copy of the video…")
+                    ctx["preview_path"] = make_preview(audio_path, job_dir / "preview.mp4")
+                    step["outputs"] = {"made": bool(ctx["preview_path"])}
                 log.info("Preview copy: %s", "preview.mp4" if ctx["preview_path"] else "failed")
+            if audio_path.stat().st_size <= KEEP_VIDEO_BYTES:  # History can show it again (V4.9)
+                kept = job_dir / f"video{audio_path.suffix.lower()}"
+                try:
+                    shutil.move(str(audio_path), kept)  # the upload folder is deleted anyway: no copy
+                except OSError:
+                    shutil.copy2(audio_path, kept)
+                ctx["video_path"] = kept
+                log.info("Video kept for History as %s", kept.name)
+            else:
+                log.info("Video not kept (over %d MB)", KEEP_VIDEO_BYTES // 2**20)
+            audio_path = ctx["video_path"] or audio_path
         else:
             input_audio = job_dir / f"input{audio_path.suffix.lower()}"
             shutil.copy2(audio_path, input_audio)
         ctx["input_audio"] = input_audio
         separate = isolate == "on"
         if isolate == "auto":
-            report("prepare", "Step 1 — checking for background music…")
-            check = detect_music(input_audio, duration, job_dir, log)
-            ctx["music_detected"] = separate = check["music"]
-            ctx["vocals_path"] = check["vocals_path"]
+            with record.step("music detection") as step:
+                report("prepare", "Step 1 — checking for background music…")
+                check = detect_music(input_audio, duration, job_dir, log)
+                ctx["music_detected"] = separate = check["music"]
+                ctx["vocals_path"] = check["vocals_path"]
+                step["outputs"] = {k: check[k] for k in ("music", "voice_db", "background_db")}
         if separate and ctx["vocals_path"] is None:
-            report("separate", f"Step 1 — {ISOLATE_TITLES[section].lower().replace('isolate', 'isolating')} "
-                               "(roughly 10–60 seconds)…")
-            ctx["vocals_path"] = separate_vocals(input_audio, job_dir, log)
+            with record.step("vocal isolation", engine=separator_engine(), model=config.SEPARATOR_MODEL) as step:
+                report("separate", f"Step 1 — {ISOLATE_TITLES[section].lower().replace('isolate', 'isolating')} "
+                                   "(roughly 10–60 seconds)…")
+                ctx["vocals_path"] = separate_vocals(input_audio, job_dir, log)
+                step["outputs"] = {"vocals": ctx["vocals_path"].name}
         if separate:
             ctx["source_path"] = ctx["vocals_path"]
             log.info("Voice isolated -> %s", ctx["vocals_path"].name)
@@ -869,10 +976,87 @@ def start_job(audio_path, section: str = "song", report=lambda key, msg: None,
             ctx["source_path"] = input_audio  # nothing to remove: use the audio as is
             log.info("Voice not isolated (isolate=%s)", isolate)
         ctx["timings"]["separate_seconds"] = round(time.perf_counter() - t0, 2)
-    except PipelineError:
+        save_state(ctx)
+    except PipelineError as e:
+        record.finish("error", str(e))
+        log.error("Job failed: %s", e)
         raise
     except Exception:
-        raise _unexpected(log, job_dir)
+        err = _unexpected(log, job_dir)
+        record.finish("error", str(err))
+        raise err
+    return ctx
+
+
+# The job context saved in the job folder (state.json), so History can open the job again after the
+# app restarts (V4.9): paths are relative to the job folder.
+STATE_KEYS = ("source_file", "stem", "duration", "section", "isolate", "music_detected", "detected_language",
+              "script", "transcribe_language", "task", "engine", "quality", "topic_words", "whisper_draft",
+              "corrections_table", "auto_corrections", "review_marks", "offline_draft", "ai_changes",
+              "ai_polish", "hotwords", "align_language", "whisper_language_used", "video_format", "rules",
+              "cues_meta", "timings", "warnings", "translation_segments", "spellings", "corrections_rows")
+STATE_PATHS = ("input_audio", "source_path", "vocals_path", "preview_path", "video_path", "thumb_path")
+
+
+def save_state(ctx: dict):
+    job_dir = ctx["job_dir"]
+    state = {k: ctx.get(k) for k in STATE_KEYS if k in ctx}
+    for k in STATE_PATHS:
+        p = ctx.get(k)
+        state[k] = Path(p).name if p else None
+    tmp = job_dir / "state.json.tmp"
+    try:
+        tmp.write_text(json.dumps(state, ensure_ascii=False, default=str), encoding="utf-8")
+        os.replace(tmp, job_dir / "state.json")
+    except OSError:
+        pass
+
+
+def load_state(job_dir: Path) -> dict:
+    """A job context from its folder (History → Open, Re-run). Raises PipelineError when the job
+    can't be opened (no captions yet, or a folder from before V4.6)."""
+    try:
+        state = json.loads((job_dir / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        state = None
+    cues_file = job_dir / "cues.json"
+    if state is None:  # a job from before 4.9: rebuild what's needed from cues.json
+        try:
+            meta = json.loads(cues_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise PipelineError("This job has no captions to open.")
+        inputs = sorted(job_dir.glob("input.*"))
+        vocals = job_dir / "vocals.wav"
+        state = {"source_file": meta.get("source_file") or job_dir.name, "stem": Path(meta.get("source_file") or "subtitles").stem,
+                 "duration": meta.get("duration_seconds") or 0.0, "section": clean_section(meta.get("section")),
+                 "isolate": meta.get("isolate"), "music_detected": meta.get("music_detected"),
+                 "script": meta.get("script"), "whisper_language_used": meta.get("whisper_language"),
+                 "align_language": meta.get("language"), "video_format": meta.get("video_format"),
+                 "input_audio": inputs[0].name if inputs else None,
+                 "vocals_path": "vocals.wav" if vocals.exists() else None,
+                 "source_path": "vocals.wav" if meta.get("isolated") and vocals.exists() else (inputs[0].name if inputs else None),
+                 "preview_path": "preview.mp4" if (job_dir / "preview.mp4").exists() else None,
+                 "rules": {"mode": meta.get("caption_mode") or "line", "max_words": meta.get("max_words_per_cue"),
+                           "max_chars": meta.get("max_chars_per_line"), "max_seconds": meta.get("max_cue_seconds"),
+                           "pause_split": meta.get("pause_split_seconds"), "merge_short": meta.get("merge_short"),
+                           "language": meta.get("language")},
+                 "timings": meta.get("timings") or {}, "warnings": []}
+    ctx = {k: v for k, v in state.items() if k not in STATE_PATHS}
+    for k in STATE_PATHS:
+        ctx[k] = job_dir / state[k] if state.get(k) and (job_dir / state[k]).exists() else None
+    if not ctx.get("input_audio") or not ctx.get("source_path"):
+        raise PipelineError("This job's audio is gone, so it can't be opened.")
+    ctx.update(job_dir=job_dir, warnings=list(ctx.get("warnings") or []), timings=dict(ctx.get("timings") or {}))
+    tl_file = job_dir / "timeline.json"
+    if tl_file.exists():
+        tl = json.loads(tl_file.read_text(encoding="utf-8"))
+        tl.setdefault("ai", {})
+        if not tl.get("ai_tokens"):
+            tl.pop("ai_tokens", None)
+        ctx["timeline"] = tl
+    ctx.setdefault("review_recorded", {})
+    ctx.setdefault("ai_recorded", [])
+    ctx.setdefault("recorded_pairs", {})
     return ctx
 
 
@@ -905,11 +1089,21 @@ def run_transcription(ctx: dict, language: str = None, report=lambda key, msg, f
                          "several times longer for Hindi…")
     try:
         t0 = time.perf_counter()
+        if ctx.get("record"):
+            ctx["record"].update("settings", {"mode": "transcribe", "language": language, "script": script,
+                                              "quality": quality, "topic_words": topic,
+                                              "ai_polish": ({"provider": ai["provider"], "model": ai["models"][ai["provider"]]}
+                                                            if ai else None)})
         script = resolve_script(script, language, ctx["source_path"], log)
         rows, table, hotwords = _corrections_for(ctx, script, language, topic)
         spellings = _house_spellings(ctx) if script == "hinglish" else {}
-        result = transcribe_audio(ctx["source_path"], language, log, script, hotwords, quality,
-                                  spellings, report)
+        with _step(ctx, "transcription", language=language, script=script, quality=quality,
+                   hotwords=hotwords or None) as step:
+            result = transcribe_audio(ctx["source_path"], language, log, script, hotwords, quality,
+                                      spellings, report)
+            step["outputs"] = {"lines": len(result["lines"]), "language": result["language"], "engine": result["engine"],
+                               "task": result["task"], "fallback": result.get("fallback_reason")}
+        log.debug("Draft:\n%s", "\n".join(result["lines"]))
         ctx["timings"]["transcribe_seconds"] = round(time.perf_counter() - t0, 2)
         engine = result["engine"]
         ctx.update(detected_language=result["language"], script=script,
@@ -939,6 +1133,7 @@ def run_transcription(ctx: dict, language: str = None, report=lambda key, msg, f
         if actual_table != table:
             rows = _corrections_rows(ctx, actual_table)
         draft, hits = corrections.apply(whisper_draft, rows)
+        _log_replacements(log, f"corrections.md ({actual_table})", hits)
         if hits:
             (job_dir / "transcript-autocorrected.txt").write_text(draft + "\n", encoding="utf-8")
             log.info("Auto-corrected %d words from the %s corrections: %s", len(hits), actual_table,
@@ -1071,8 +1266,20 @@ def run_polish(ctx: dict, text: str, ai: dict, report=lambda key, msg, fraction=
                  "sent": text, "returned": "\n".join(all_lines), "changes": marks,
                  "lines_kept_unpolished": [keep[i] + 1 for i in result["skipped_lines"]]})
     runs_file.write_text(json.dumps(runs, indent=1, ensure_ascii=False), encoding="utf-8")
-    log.info("AI polish with %s (%s) in %.1fs: %d changes%s: %s", name, model, result["seconds"],
-             len(marks), f", {len(result['skipped_lines'])} lines rejected and kept as they were"
+    log.debug("AI polish request:\n%s", result.get("request"))
+    log.debug("AI polish response:\n%s", result.get("response"))
+    for m in marks:
+        log.info("AI polish: accepted “%s” -> “%s” (line %d)", m["original"], m["replacement"], m["line"] + 1)
+    for k in result["skipped_lines"]:
+        log.info("AI polish: refused line %d (rewrote too much): %s", keep[k] + 1, all_lines[keep[k]])
+    if ctx.get("record"):
+        ctx["record"].add("ai", {"kind": "polish", "provider": ai["provider"], "model": model,
+                                 "seconds": result["seconds"], "usage": result.get("usage"),
+                                 "accepted": marks, "refused_lines": [keep[k] + 1 for k in result["skipped_lines"]],
+                                 "request": result.get("request"), "response": result.get("response")})
+        ctx["record"].save()
+    log.info("AI polish with %s (%s) in %.1fs, tokens %s: %d changes%s: %s", name, model, result["seconds"],
+             result.get("usage") or "n/a", len(marks), f", {len(result['skipped_lines'])} lines rejected and kept as they were"
              if result["skipped_lines"] else "",
              ", ".join(f"{m['original']} -> {m['replacement']}" for m in marks) or "none")
     message = None
@@ -1239,63 +1446,161 @@ def align_and_write(ctx: dict, lyrics_text: str, strip_tags: bool = True,
         log.warning(lyric_warning)
     (job_dir / "lyrics.txt").write_text("\n".join(lyric_lines) + "\n", encoding="utf-8")
 
+    record = ctx.get("record")
+    if record:
+        record.update("settings", {"mode": "transcribe" if transcribed else "lyrics", "format": video_format,
+                                   "caption_mode": rules["mode"], "language": language, "script": script,
+                                   "strip_tags": strip_tags, "max_words": rules["max_words"],
+                                   "max_chars": rules["max_chars"], "merge_short": rules["merge_short"],
+                                   "final_check": ({"provider": ai["provider"], "model": ai["models"][ai["provider"]]}
+                                                   if ai else None)})
+        record.set("text", {"lines": lyric_lines, "speakers": labels or None})
     try:
         song = ctx["section"] == "song"
         isolated = ctx["source_path"] == ctx["vocals_path"]
         t0 = time.perf_counter()
-        if approximate:
-            report("align", "Timing the translation from Whisper's phrase timings…")
-            segments = approximate_segments(ctx["translation_segments"], lyric_lines)
-        else:
-            report("align", f"Aligning {'lyrics' if song else 'the transcript'} (first run "
-                            "loads the model, roughly 30 seconds to 2 minutes)…")
-            result = align_lyrics(ctx["source_path"], lyric_lines, log, whisper_language)
-            whisper_language = whisper_language or getattr(result, "language", None)
-            segments = result.segments
-        timings["align_seconds"] = round(time.perf_counter() - t0, 2)
+        with _step(ctx, "alignment", lines=len(lyric_lines), language=whisper_language,
+                   approximate=approximate) as step:
+            if approximate:
+                report("align", "Timing the translation from Whisper's phrase timings…")
+                segments = approximate_segments(ctx["translation_segments"], lyric_lines)
+            else:
+                report("align", f"Aligning {'lyrics' if song else 'the transcript'} (first run "
+                                "loads the model, roughly 30 seconds to 2 minutes)…")
+                result = align_lyrics(ctx["source_path"], lyric_lines, log, whisper_language)
+                whisper_language = whisper_language or getattr(result, "language", None)
+                segments = result.segments
+            timings["align_seconds"] = round(time.perf_counter() - t0, 2)
+            words = captions.words_from_segments(segments, lyric_lines, speakers)
+            step["outputs"] = {"segments": len(segments), "words": len(words), "language": whisper_language}
         log.info("Timed %d segments in %.1fs", len(segments), timings["align_seconds"])
+        _log_words(log, "Aligned words", words, lyric_lines)
+        ctx.update(align_language=language, whisper_language_used=whisper_language, review_recorded={},
+                   video_format=video_format, ai_recorded=[])
 
         report("build", "Building the captions…")
         t0 = time.perf_counter()
-        words = captions.words_from_segments(segments, lyric_lines, speakers)
-        dropped = []
+        checked = {"lines": [], "flagged": [], "recovered": [], "not_found": []}
         if not transcribed and not approximate:
-            # Only what's spoken: script lines the aligner couldn't find are left out (V4.6).
-            dropped = captions.unmatched_lines(words, config.UNMATCHED_LINE_PROBABILITY)
-            if len(dropped) >= len(lyric_lines):
-                dropped = []  # nothing matched well: better to show it all than nothing
-            if dropped:
-                words = [w for w in words if w["line"] not in dropped]
-                shown = ", ".join(f"“{lyric_lines[i]}”" for i in dropped[:5])
-                more = f" and {len(dropped) - 5} more" if len(dropped) > 5 else ""
-                warning = (f"{len(dropped)} script line(s) weren't found in the audio and were left out "
-                           f"of the SRT: {shown}{more}")
-                warnings.append(warning)
-                log.warning(warning + " (lines %s)", [i + 1 for i in dropped])
+            # V4.9: a script line the aligner wasn't sure of is checked against the audio, never
+            # silently dropped (script_lines.py).
+            import listen_check
+            import script_lines
+            with _step(ctx, "script lines", threshold=config.SCRIPT_LINE_CONFIDENCE) as step:
+                hearing = listen_check.hearing_for(ctx, rules) if config.LISTEN_CHECK else None
+                checked = script_lines.resolve(ctx, words, lyric_lines, threshold=config.SCRIPT_LINE_CONFIDENCE,
+                                               hearing=hearing, language=caption_language,
+                                               speech=speech_of(ctx), report=report)
+                words = checked["words"]
+                step["outputs"] = {k: len(checked[k]) for k in ("recovered", "flagged", "not_found")}
+            if record:
+                record.set("script_lines", checked["lines"])
+            for r in checked["lines"]:
+                if r["status"] == "not_found":
+                    log.warning("Script line %d not found in the audio (not in the SRT unless added back): %s",
+                                r["line"], r["text"])
         if not words:
             raise PipelineError(ALIGN_FAILURE_MESSAGE)
         numbers_language = "hinglish" if "hinglish" in (language, script) else whisper_language
-        tokens = captions.offline_cleanup(captions.make_tokens(words, numbers_language, number_exceptions()), words)
+        with _step(ctx, "numbers and symbols", language=numbers_language) as step:
+            tokens = captions.offline_cleanup(captions.make_tokens(words, numbers_language, number_exceptions()), words)
+            step["outputs"] = _log_tokens(log, tokens, words)
         ctx["timeline"] = {"words": words, "tokens": tokens, "lines": lyric_lines, "speakers": speakers,
-                           "dropped_lines": dropped, "numbers_language": numbers_language,
+                           "dropped_lines": [r["line"] - 1 for r in checked["not_found"]],
+                           "script_flags": {str(i): "flagged" for i in checked["flagged"]}
+                           | {str(i): "recovered" for i in checked["recovered"]},
+                           "not_found": checked["not_found"],
+                           "numbers_language": numbers_language,
                            "script_text": None if transcribed else lyrics_text, "ai": {}}
-        ctx.update(align_language=language, whisper_language_used=whisper_language, review_recorded={},
-                   video_format=video_format, ai_recorded=[])
         layout = build_layout(ctx, rules, ai, report)
         timings["outputs_seconds"] = round(time.perf_counter() - t0, 2)
         out = write_outputs(ctx, layout, rules, extra={
             "language": language, "script": script, "whisper_language": whisper_language,
             "timing": "approximate" if approximate else "aligned", "speakers": labels or None,
-            "dropped_lines": [{"line": i + 1, "text": lyric_lines[i]} for i in dropped]})
+            "dropped_lines": checked["not_found"]})
         stem_path = export_stem(ctx["vocals_path"], job_dir) if isolated else None
         log.info("Outputs written. Timings: %s", timings)
+        save_state(ctx)
         return {**out, "stem_path": stem_path, "audio_path": ctx["input_audio"], "job_dir": job_dir,
                 "timings": timings,
                 "warnings": warnings + ([layout["ai_message"]] if layout["ai_message"] else [])}
-    except PipelineError:
+    except PipelineError as e:
+        if record:
+            record.finish("error", str(e))
         raise
     except Exception:
-        raise _unexpected(log, job_dir)
+        err = _unexpected(log, job_dir)
+        if record:
+            record.finish("error", str(err))
+        raise err
+
+
+@contextmanager
+def _step(ctx: dict, name: str, **inputs):
+    """record.step() when the job has a job.json (always, from 4.9); a no-op for old contexts."""
+    record = ctx.get("record")
+    if record is None:
+        yield {"outputs": {}}
+        return
+    with record.step(name, **inputs) as entry:
+        yield entry
+
+
+def speech_of(ctx: dict) -> list[tuple[float, float]] | None:
+    """Voice activity in the job's audio (cached in the timeline), or None if it can't be had."""
+    tl = ctx.get("timeline") or {}
+    if tl.get("speech") is not None:
+        return [tuple(x) for x in tl["speech"]]
+    if ctx.get("speech") is not None:
+        return ctx["speech"]
+    import script_lines
+    if not ctx.get("source_path") or not Path(ctx["source_path"]).exists():
+        return None
+    try:
+        with _step(ctx, "voice activity", audio=Path(ctx["source_path"]).name) as step:
+            speech = script_lines.speech_regions(ctx["source_path"])
+            step["outputs"] = {"regions": len(speech), "seconds": round(sum(b - a for a, b in speech), 2)}
+    except Exception:  # noqa: BLE001 — only the "possible missing caption" hints depend on it
+        ctx["log"].warning("Voice activity detection failed:\n%s", traceback.format_exc())
+        return None
+    ctx["speech"] = speech
+    ctx["log"].debug("Voice activity: %s", " ".join(f"{a:.2f}–{b:.2f}" for a, b in speech))
+    return speech
+
+
+def _log_words(log: logging.Logger, title: str, words: list[dict], lines: list[str] | None = None):
+    """Raw word timestamps (DEBUG) and a confidence score per line (INFO)."""
+    log.debug("%s: %s", title, " ".join(f"[{w['line'] + 1}]{w['word']}@{w['start']:.3f}-{w['end']:.3f}"
+                                         f"({w['probability'] if w.get('probability') is not None else '-'})"
+                                         for w in words))
+    if lines is None:
+        return
+    by: dict[int, list] = {}
+    for w in words:
+        by.setdefault(w["line"], []).append(w)
+    for i, line in enumerate(lines):
+        ws = by.get(i, [])
+        probs = [w["probability"] for w in ws if w.get("probability") is not None]
+        log.info("Line %d confidence %s, %s: %s", i + 1, f"{sum(probs) / len(probs):.3f}" if probs else "n/a",
+                 f"{ws[0]['start']:.3f}–{ws[-1]['end']:.3f}" if ws else "no words", line)
+
+
+def _log_tokens(log: logging.Logger, tokens: list[dict], words: list[dict]) -> dict:
+    """Number conversions and symbol removals, as made by the caption rules."""
+    numbers, symbols = [], []
+    for t in tokens:
+        raw = " ".join(w["word"] for w in words[t["w0"]:t["w1"] + 1])
+        if t["text"] != raw and any(ch.isdigit() for ch in t["text"]):
+            numbers.append(f"{raw} -> {t['text']}")
+        shown = captions.clean_caption(t["text"])
+        if shown != t["text"]:
+            symbols.append(f"{t['text']} -> {shown or '(removed)'}")
+    for line in numbers:
+        log.debug("Number: %s", line)
+    for line in symbols:
+        log.debug("Symbol removed: %s", line)
+    log.info("Caption text: %d number conversion(s), %d symbol removal(s)", len(numbers), len(symbols))
+    return {"tokens": len(tokens), "numbers": numbers, "symbols": symbols}
 
 
 def _ai_key(rules: dict) -> str:
@@ -1310,6 +1615,7 @@ def build_layout(ctx: dict, rules: dict, ai: dict | None, report=lambda key, msg
     import ai_polish
     import final_check
 
+    ctx.setdefault("log", logging.getLogger("srt.pipeline"))
     tl = ctx["timeline"]
     words = tl["words"]
     tokens = tl.get("ai_tokens") or tl["tokens"]
@@ -1325,10 +1631,15 @@ def build_layout(ctx: dict, rules: dict, ai: dict | None, report=lambda key, msg
             language = HINGLISH_LABEL
         else:
             language = language_name(ctx["whisper_language_used"]) if ctx.get("whisper_language_used") else None
-        result = final_check.review(tokens, words, current, ai, section=ctx["section"],
-                                    language=language,
-                                    script=ctx.get("script"), script_text=tl.get("script_text"), rules=rules,
-                                    exceptions=number_exceptions())
+        with _step(ctx, "final AI check", provider=ai["provider"], model=ai["models"][ai["provider"]],
+                   mode=rules["mode"]) as step:
+            result = final_check.review(tokens, words, current, ai, section=ctx["section"],
+                                        language=language,
+                                        script=ctx.get("script"), script_text=tl.get("script_text"), rules=rules,
+                                        exceptions=number_exceptions())
+            step["outputs"] = {"changes": result["changes"], "refused": len(result.get("refused") or []),
+                               "cuts_used": result["chunks"] is not None, "usage": result.get("usage"),
+                               "message": result["message"]}
         message = result["message"]
         tl["ai"][key] = {"chunks": result["chunks"], "message": message}
         if result["changes"]:
@@ -1339,19 +1650,63 @@ def build_layout(ctx: dict, rules: dict, ai: dict | None, report=lambda key, msg
         chunks = captions.merge_cuts(tokens, words, saved, rules)[0] if saved \
             else captions.line_chunks(tokens, words, rules)
     cue_rules = {**rules, "audio_end": ctx.get("duration")}
-    cues = captions.build_cues(tokens, words, cue_rules, chunks)
+    with _step(ctx, "line-breaking", mode=rules["mode"], max_words=rules["max_words"], max_chars=rules["max_chars"]) as step:
+        cues = captions.build_cues(tokens, words, cue_rules, chunks)
+        step["outputs"] = {"captions": len(cues), "ai_cuts": bool(rules["mode"] == "line" and tl["ai"].get(key, {}).get("chunks"))}
+    ctx["log"].debug("Captions built: %s", " | ".join(f"{c['start']:.3f}-{c['end']:.3f} {c['text']}" for c in cues))
     listen = None
     if config.LISTEN_CHECK:  # V4.8: every caption checked against the audio, after the AI check
         import listen_check
         t0 = time.perf_counter()
-        listened = listen_check.run(ctx, tokens, words, cues, cue_rules, report)
+        with _step(ctx, "listening check", captions=len(cues)) as step:
+            listened = listen_check.run(ctx, tokens, words, cues, cue_rules, report)
+            step["outputs"] = {k: v for k, v in listened["summary"].items() if not isinstance(v, (list, dict))}
         cues, listen = listened["cues"], listened["summary"]
         if listened.get("changed"):  # its fixes live in the timeline, so a Line/Word switch keeps them
             tl["words"] = listened["words"]
             tl["ai_tokens" if tl.get("ai_tokens") else "tokens"] = listened["tokens"]
         ctx.setdefault("timings", {})["listen_seconds"] = round(time.perf_counter() - t0, 2)
-    return {"cues": cues, "ai_message": message, "ai_provider": provider, "listen": listen,
+    _mark_script_lines(cues, tl, tokens if not listen else (tl.get("ai_tokens") or tl["tokens"]), tl["words"])
+    missing = []
+    speech = speech_of(ctx)
+    if speech is not None:
+        import script_lines
+        with _step(ctx, "possible missing captions") as step:
+            missing = script_lines.missing_captions(speech, cues)
+            step["outputs"] = {"found": len(missing)}
+        tl["speech"] = speech
+        for m in missing:
+            ctx["log"].info("Possible missing caption: speech at %s–%s (%.1f s) with no caption", _clock(m["start"]),
+                            _clock(m["end"]), m["seconds"])
+        if ctx.get("record"):
+            ctx["record"].set("missing_captions", missing)
+    return {"cues": cues, "ai_message": message, "ai_provider": provider, "listen": listen, "missing": missing,
             "ai_changes": sum(len(c.get("ai", [])) for c in cues)}
+
+
+def _clock(t: float) -> str:
+    m, s = divmod(max(0.0, t), 60)
+    return f"{int(m)}:{s:06.3f}"
+
+
+SCRIPT_FLAG = "Script line not confidently found — check it"
+
+
+def _mark_script_lines(cues: list[dict], tl: dict, tokens: list[dict], words: list[dict]):
+    """Captions carrying a script line the aligner wasn't sure of: "flag" (check it) or "recovered"."""
+    flags = tl.get("script_flags") or {}
+    if not flags:
+        return
+    for cue in cues:
+        lines = set()
+        for k in cue.get("tokens") or []:
+            if k < len(tokens):
+                lines |= {words[w]["line"] for w in range(tokens[k]["w0"], tokens[k]["w1"] + 1) if w < len(words)}
+        states = {flags.get(str(i)) for i in lines} - {None}
+        if "flagged" in states:
+            cue["script"] = {"status": "flag", "reason": SCRIPT_FLAG, "lines": sorted(i + 1 for i in lines)}
+        elif "recovered" in states:
+            cue["script"] = {"status": "recovered", "lines": sorted(i + 1 for i in lines)}
 
 
 def _log_ai(ctx: dict, result: dict, rules: dict):
@@ -1366,8 +1721,22 @@ def _log_ai(ctx: dict, result: dict, rules: dict):
                  "refused": result.get("refused") or [], "unsure": result.get("unsure") or [],
                  "message": result["message"], "sent": result["sent"], "returned": result["returned"]})
     path.write_text(json.dumps(runs, indent=1, ensure_ascii=False), encoding="utf-8")
-    ctx["log"].info("Final AI check (%s, %s mode) in %ss: %d text fixes, AI cuts %s%s",
-                    result.get("provider"), rules["mode"], result.get("seconds"), result["changes"],
+    log = ctx["log"]
+    log.debug("Final AI check request:\n%s", result["sent"])
+    log.debug("Final AI check response:\n%s", result["returned"])
+    for k, t in enumerate(result["tokens"]):
+        if t.get("orig") is not None:
+            log.info("Final AI check: accepted “%s” -> “%s” (word %d)", t["orig"], t["text"], k)
+    if ctx.get("record"):
+        ctx["record"].add("ai", {"kind": "final check", "provider": result.get("provider"), "mode": rules["mode"],
+                                 "seconds": result.get("seconds"), "usage": result.get("usage"),
+                                 "accepted": [{"i": k, "from": t["orig"], "to": t["text"]}
+                                              for k, t in enumerate(result["tokens"]) if t.get("orig") is not None],
+                                 "refused": result.get("refused") or [], "message": result["message"],
+                                 "request": result["sent"], "response": result["returned"]})
+    ctx["log"].info("Final AI check (%s, %s mode) in %ss, tokens %s: %d text fixes, AI cuts %s%s",
+                    result.get("provider"), rules["mode"], result.get("seconds"), result.get("usage") or "n/a",
+                    result["changes"],
                     "used" if result["chunks"] is not None else "not used",
                     f" — {result['message']}" if result["message"] else "")
     for r in result.get("refused") or []:  # V4.8: every refused change, and why
@@ -1383,15 +1752,19 @@ def write_outputs(ctx: dict, layout: dict, rules: dict, extra: dict | None = Non
     job_dir = ctx["job_dir"]
     cues = layout["cues"]
     srt_path = job_dir / f"{ctx['stem']}.srt"
-    write_srt(cues, srt_path)
-    original_srt = job_dir / "original.srt"
-    write_srt(cues, original_srt)
+    with _step(ctx, "write SRT", captions=len(cues)) as step:
+        write_srt(cues, srt_path)
+        original_srt = job_dir / "original.srt"
+        write_srt(cues, original_srt)
+        step["outputs"] = {"srt": srt_path.name, "bytes": srt_path.stat().st_size, "captions": len(cues)}
+    ctx["log"].info("SRT written: %s (%d captions, %d bytes) and original.srt", srt_path.name, len(cues),
+                    srt_path.stat().st_size)
     for stale in ("edited.srt", "edited-cues.json"):
         (job_dir / stale).unlink(missing_ok=True)
     tl = ctx["timeline"]
     timeline = {k: tl[k] for k in ("words", "tokens", "lines", "speakers", "dropped_lines", "numbers_language")}
-    timeline["ai_tokens"] = tl.get("ai_tokens")
-    timeline["heard"] = tl.get("heard")
+    for k in ("ai_tokens", "heard", "script_flags", "not_found", "speech", "script_text"):
+        timeline[k] = tl.get(k)
     (job_dir / "timeline.json").write_text(json.dumps(timeline, ensure_ascii=False), encoding="utf-8")
     isolated = ctx["source_path"] == ctx["vocals_path"]
     meta = ctx.setdefault("cues_meta", {})
@@ -1417,6 +1790,9 @@ def write_outputs(ctx: dict, layout: dict, rules: dict, extra: dict | None = Non
         **{k: meta.get(k) for k in ("language", "script", "whisper_language", "timing", "speakers",
                                     "dropped_lines", "final_check")},
         "listen_check": layout.get("listen"),
+        "script_lines": script_summary(tl, cues),
+        "not_found": tl.get("not_found") or [],
+        "missing_captions": layout.get("missing") or [],
         "transcribe_language": ctx.get("transcribe_language"),
         "spoken_language": ctx.get("detected_language"),
         "task": ctx.get("task"),
@@ -1436,9 +1812,27 @@ def write_outputs(ctx: dict, layout: dict, rules: dict, extra: dict | None = Non
     }
     (job_dir / "cues.json").write_text(json.dumps(cues_json, indent=2, ensure_ascii=False), encoding="utf-8")
     ctx["rules"] = rules
+    ctx["missing"] = layout.get("missing") or []
+    summary = {"captions": len(cues), "listen": layout.get("listen"), "script_lines": script_summary(tl, cues),
+               "missing_captions": len(ctx["missing"]), "ai_changes": layout["ai_changes"]}
+    if ctx.get("record"):
+        ctx["record"].update("summary", summary)
+        ctx["record"].finish("done")
+    ctx["log"].info("Summary: %s", joblog.dumps(summary))
+    save_state(ctx)
     return {"srt_path": srt_path, "original_srt_path": original_srt, "cues_path": job_dir / "cues.json",
             "cues": cues, "max_chars": rules["max_chars"], "caption_mode": rules["mode"],
-            "ai_message": layout["ai_message"], "ai_changes": layout["ai_changes"], "listen": layout.get("listen")}
+            "ai_message": layout["ai_message"], "ai_changes": layout["ai_changes"], "listen": layout.get("listen"),
+            "missing": ctx["missing"], "not_found": tl.get("not_found") or [],
+            "script_summary": summary["script_lines"]}
+
+
+def script_summary(tl: dict, cues: list[dict] | None = None) -> dict:
+    """Script lines recovered, flagged (to check) and not found, for the summary before download."""
+    flags = tl.get("script_flags") or {}
+    return {"recovered": sum(v == "recovered" for v in flags.values()),
+            "flagged": sum(v == "flagged" for v in flags.values()),
+            "not_found": len(tl.get("not_found") or [])}
 
 
 def relayout(ctx: dict, caption_mode: str, ai: dict | None = None, report=lambda key, msg: None,

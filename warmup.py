@@ -12,7 +12,17 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 
 
+def _app_log(level: int, message: str):
+    """Warmup's result also goes to the app log (V4.9)."""
+    try:
+        import joblog
+        joblog.setup_app_log().log(level, "Warmup: %s", message)
+    except Exception:  # noqa: BLE001 — never fail setup over the log
+        pass
+
+
 def fail(message: str) -> int:
+    _app_log(40, f"FAIL: {message}")
     print(f"\nFAIL: {message}")
     return 1
 
@@ -57,6 +67,7 @@ def main() -> int:
         return fail("SRT file looks malformed.")
 
     t = result["timings"]
+    _app_log(20, f"PASS — {len(result['cues'])} cues, timings {t}")
     print(f"\nPASS — {len(result['cues'])} cues written to {result['srt_path'].name}")
     print(f"  vocal isolation: {t['separate_seconds']:.1f}s")
     print(f"  lyric alignment: {t['align_seconds']:.1f}s")

@@ -241,7 +241,7 @@ def review(tokens: list[dict], words: list[dict], chunks: list[list[int]], setti
         notes.append(f"{len(rejected)} change(s) were refused and ignored ({'; '.join(kinds)}); "
                      "the job log lists each one")
     result.update(tokens=new_tokens, chunks=new_chunks, changes=len(edits), refused=rejected, unsure=unsure,
-                  seconds=round(time.perf_counter() - t0, 2))
+                  seconds=round(time.perf_counter() - t0, 2), usage=getattr(adapter, "usage", None))
     if notes:
         result["message"] = f"Final AI check by {name}: " + "; ".join(notes) + "."
     return result

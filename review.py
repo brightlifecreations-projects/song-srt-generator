@@ -5,12 +5,13 @@ Review panel go to edited.srt (+ edited-cues.json); the original is never touche
 are learnt into corrections.md as User fixes, once each, like the draft box's.
 """
 
+import difflib
 import json
-import subprocess
 from collections import Counter
 
 import captions
 import corrections
+import joblog
 import pipeline
 
 
@@ -39,6 +40,13 @@ def clean_cues(raw: list) -> list[dict]:
         if unsure:
             cue["unsure"] = unsure
         listen = c.get("listen")
+        script = c.get("script")
+        if isinstance(script, dict) and script.get("status") in ("flag", "recovered"):
+            cue["script"] = {"status": script["status"], "reason": str(script.get("reason") or "")[:200],
+                             "lines": [int(n) for n in (script.get("lines") or []) if isinstance(n, int)][:20],
+                             **({"resolved": True} if script.get("resolved") else {})}
+        if isinstance(c.get("added"), int):  # a "Not found in the audio" line the user added back
+            cue["added"] = int(c["added"])
         if isinstance(listen, dict) and listen.get("status") in LISTEN_STATUSES:
             cue["listen"] = {"status": listen["status"],
                              "reasons": [str(r)[:300] for r in (listen.get("reasons") or [])][:5],
@@ -50,6 +58,45 @@ def clean_cues(raw: list) -> list[dict]:
     for i, c in enumerate(cues, start=1):
         c["index"] = i
     return cues
+
+
+def _fmt(c: dict) -> str:
+    return f"{c['start']:.3f}–{c['end']:.3f} “{c['text']}”"
+
+
+def log_edits(ctx: dict, before: list[dict], after: list[dict]):
+    """Every change the Review panel saved, in log.txt and job.json: cues added, deleted, re-timed or
+    re-typed, flags cleared (V4.9)."""
+    key = lambda c: (round(c["start"], 3), round(c["end"], 3), c["text"])  # noqa: E731
+    a, b = [key(c) for c in before], [key(c) for c in after]
+    changes = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(a=a, b=b, autojunk=False).get_opcodes():
+        if op == "equal":
+            continue
+        old, new = before[i1:i2], after[j1:j2]
+        if op == "replace" and len(old) == len(new):
+            for o, n in zip(old, new):
+                what = [w for w, same in (("text", o["text"] == n["text"]),
+                                          ("timing", (o["start"], o["end"]) == (n["start"], n["end"]))) if not same]
+                changes.append({"edit": " and ".join(what) or "changed", "from": _fmt(o), "to": _fmt(n)})
+            continue
+        changes += [{"edit": "deleted", "from": _fmt(o)} for o in old]
+        changes += [{"edit": "added", "to": _fmt(n)} for n in new]
+    flags = lambda cs: sum(1 for c in cs for k in ("listen", "script") if (c.get(k) or {}).get("resolved"))  # noqa: E731
+    cleared = flags(after) - flags(before)
+    if cleared > 0:
+        changes.append({"edit": f"{cleared} flag(s) marked as checked"})
+    unsure = sum(len(c.get("unsure") or []) for c in before) - sum(len(c.get("unsure") or []) for c in after)
+    if unsure > 0:
+        changes.append({"edit": f"{unsure} [?] mark(s) cleared"})
+    for ch in changes:
+        ctx["log"].info("Review edit: %s%s%s", ch["edit"], f" {ch['from']}" if "from" in ch else "",
+                        f" -> {ch['to']}" if "to" in ch else "")
+    record = ctx.get("record")
+    if record and changes:
+        record.add("edits", {"time": joblog._now(), "changes": changes, "captions": len(after)})
+        record.save()
+    return changes
 
 
 def _table(ctx: dict) -> str:
@@ -123,9 +170,9 @@ def retime(ctx: dict, start: float, end: float, text: str, low: float | None = N
     if t1 - t0 < 0.2 or not str(text).strip():
         raise pipeline.PipelineError("This cue is too short to re-time.")
     clip = ctx["job_dir"] / "retime.wav"
-    proc = subprocess.run([pipeline.FFMPEG, "-y", "-v", "error", "-ss", f"{t0:.3f}", "-t", f"{t1 - t0:.3f}",
-                           "-i", str(ctx["source_path"]), "-ac", "1", "-ar", "16000", str(clip)],
-                          capture_output=True)
+    proc = joblog.run([pipeline.FFMPEG, "-y", "-v", "error", "-ss", f"{t0:.3f}", "-t", f"{t1 - t0:.3f}",
+                       "-i", str(ctx["source_path"]), "-ac", "1", "-ar", "16000", str(clip)],
+                      what="re-time clip", log=ctx["log"])
     if proc.returncode != 0 or not clip.exists():
         raise pipeline.PipelineError("Couldn't cut this cue's audio to re-time it.")
     try:

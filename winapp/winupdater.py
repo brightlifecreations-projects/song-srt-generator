@@ -61,6 +61,7 @@ class Backend:
 
     def check(self):
         """A check with WinSparkle's window (it ignores "Skip this version", like the Mac)."""
+        self.log("WinSparkle: update check started")
         self.s.status, self.s.error, self.s.manual = "checking", None, True
         self.dll.win_sparkle_check_update_with_ui()
 
@@ -88,6 +89,7 @@ class Backend:
         self.s.manual = False
 
     def not_found(self):
+        self.log("WinSparkle: up to date")
         self.s.status, self.s.available, self.s.manual = "uptodate", None, False
 
     def error(self):
