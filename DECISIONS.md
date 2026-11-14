@@ -512,17 +512,20 @@ Recorded 2026-07-15 from Aman's answers.
   - Then it checks again, and repeats while the aligner is lost somewhere else (at most 4 rounds; a stretch it can't improve isn't retried, and lines Whisper placed are never "lost" again).
   - **CRT, lines 80–95 before → after:** 292.56–309.88 → 273.84–275.66; 312.72–315.44 → 276.17–280.81; 316.02–323.30 → 281.15–284.39; 323.84–331.52 → 284.69–286.71; 331.52–335.22 → 287.13–291.81; 336.38–338.68 → 292.59–296.47; 338.68 (no length) → 296.89–299.35; 338.68–339.02 → 299.99–304.27; and lines 88–95, all at 339.02 with no length before → 304.87, 308.15, 311.31, 315.81, 320.25, 323.69, 329.17, 334.21 (each 2.5–5 s long). Line 79: 269.48–292.56 → 269.42–273.46. One round, 17 of 17 lines heard, 40 s.
   - **Checked against an independent Whisper transcript of the whole file:** 15 of the 18 low lines start within 0.5 s of where Whisper hears them, and the other 3 are within 0.53–0.71 s, which is within the error of Whisper's own word timings.
+  - **Stretched lines are never anchors.** In a fresh run of the same file the aligner scored line 79 at 0.349, with no zero-length word but 10-second holes between its own words (271.0 → 281.4 → 290.8 s). The first version took it as the anchor and crushed lines 80–84 into 0.3 s. A line with a 4-second hole between two of its words, or one stretched past 1.4 s per word and over 8 s, now counts as low (`STRETCH_HOLE`, `STRETCH_PER_WORD`). On that run's vocals: anchor line 78, 17 of 17 lines heard, and 16 of the 18 low lines start within 0.5 s of where Whisper hears them (1 at 0.71 s, 1 not in the reference transcript).
+  - stable-ts doesn't lose its place the same way twice (each fresh voice separation is slightly different). The final real run of this file lost it at line 68 instead; re-anchoring put lines 68, 69 and 71 where Whisper heard them, and lines 79–95 came out of the aligner already in place (from 269.48 to 336.98 s, confidence 0.39–0.83).
 - **Then every line still below the threshold (`script_lines.resolve`):**
   - The line is placed in the gap between its confident neighbours (aligned again there), and Whisper re-listens to the gap (the Hinglish model for Hinglish; all the gaps packed into shared calls).
   - If half its words are heard, it's **recovered** and kept.
   - If the gap has speech (voice activity or heard words, judged on its inner part: 0.3 s at each end belongs to the neighbours) but no clear match, it's **flagged**: "Script line not confidently found — check it".
   - Only when the gap has no speech at all is it **not found**: left out of the SRT and listed in the Review panel with **Add it back** (in its gap, after the caption before it, or at the playhead).
   - If voice detection or the re-listen can't run, the line is flagged, never declared not found.
-  - Whisper repetition loops (the same word 5+ times, or one 25-letter "word") are heard again in halves, and what's still a loop is ignored. The Hinglish model looped on Aditi's chorus ("hansate hansate…" for 25 s); this was the cause of 4.8's slipped-line flags on the outro.
-- **Results per case:**
-  - CRT: 18 low lines, 18 recovered (all by re-anchoring), 0 flagged, 0 not found.
-  - Aditi: 7 low lines, 5 recovered, 2 flagged ("Ye aditi jaane tu", "Hey aditi husde husde": voice there, Whisper wrote nothing clear), 0 not found. All three "Nahi toh bas," repeats are kept in order at 171.3, 191.3 and 211.8 s.
-  - Line under music: flagged, kept at its spoken position. The chat-spelled Hinglish line under music: flagged.
+  - In re-anchoring and this check only, Whisper repetition loops (the same word 5+ times, or one 25-letter "word") are heard again in halves, and what's still a loop is ignored (`Ear.split_loops`). The Hinglish model loops on Aditi's chorus ("hansate hansate…" for 25 s); in a short gap a loop would otherwise pass for a line or hide one. The listening check keeps 4.8's hearing. With loop splitting there, Aditi's check took 465 s instead of 111 s (63 Whisper calls) and raised 31 flags instead of 25, because misheard words became "nothing heard". So it was tried and reverted.
+- **Results per case** (low = below 0.15, squeezed or stretched; "correct" = starts within 0.5 s of where an independent Whisper transcript hears the line):
+  - CRT (original vocals): 18 low lines, 18 recovered (17 by re-anchoring, 1 in its gap), 15 correct + 3 within 0.71 s, 0 flagged, 0 not found.
+  - CRT (fresh vocals): 18 recovered, 16 correct, 0 flagged, 0 not found.
+  - Aditi: 7 low lines, 5 recovered, 2 flagged ("Ye aditi jaane tu", "Hey aditi husde husde": voice there, Whisper wrote nothing clear), 0 not found. The recovered "Nahi toh bas," repeats are kept in order at 171.3, 191.3 and 211.8 s. Two of them were checked against the reference and are correct; the rest can't be told apart there, because the reference matches whichever repeat is nearer.
+  - Line under music: flagged, kept at its spoken position (Whisper can't hear it either). The chat-spelled Hinglish line under music: flagged.
   - The UI suite's drama script: a line that isn't spoken (in a silent gap) is not found; a line whose words don't match what's said is flagged.
 - **The Kabhi Kabhi Aditi outro (2:52–3:28):** re-heard with Whisper medium in 8-second windows, the chorus lines sit where they're sung (e.g. "Nahi toh bas" heard at 171.1, 181.1, 191.3, 201.4 s against captions at 171.4, 181.2, 191.4, 201.6 s), so the captions hadn't slipped. 4.8's flags came from the looping re-listen described above.
 - **Threshold `SCRIPT_LINE_CONFIDENCE = 0.15`** (4.8's value, now the line between "trust" and "check", no longer "drop").
@@ -537,7 +540,12 @@ Recorded 2026-07-15 from Aman's answers.
   - **Per job:** `log.txt` (millisecond timestamps; DEBUG with Log level "Detailed", the default; INFO with "Normal") and `job.json`. job.json holds the environment, the settings, the input (ffprobe: size, duration, codecs, has video), and every step with start, end, duration, inputs and outputs. It also has every external command (exact command line, exit code, time, stdout/stderr trimmed to 4,000 characters), model loads/unloads/cache hits/downloads, script-line results, re-anchoring rounds, AI requests and responses with tokens and each change accepted or refused, missing captions, Review edits, warnings and errors with tracebacks. It is saved after every step, so a crash still leaves it.
   - **App-wide:** `logs/app.log`, rotating at 10 MB, 5 files. It records start and stop, setup steps and warmup (also from the launchers), every `/api/` request (method, path, status, ms; job polling at DEBUG), queue events, Sparkle/WinSparkle/GitHub update checks, the Hinglish model download, settings changes, key-store access (success or failure only), and uncaught errors in any thread.
 - **Privacy.** Everything written passes through `redact()`: the home folder becomes `~`. Any key read from or saved to the key store is registered and replaced with "[key removed]", and so is anything shaped like a key (sk-…, AIza…, Bearer …, api_key=…). Report zips are redacted the same way. Tests scan every log, job.json and a report zip for a key-store value and the real home path.
-- **Size:** the Detailed log adds about 9 KB (log.txt) + 10 KB (job.json) to a 17-second job, and _REALRUN_SIZES_.
+- **Size** (log.txt + job.json, Detailed):
+  - sample clip: 12 + 12 KB (0.4 % of a 6.4 MB job folder)
+  - Kabhi Kabhi Aditi, 3:38: 103 + 54 KB (0.3 % of 48 MB)
+  - the 2:18 Hinglish reel: 109 + 60 KB (0.3 % of 55 MB)
+  - the 5:39 CRT ad: 287 + 106 KB (0.6 % of 66 MB)
+  - The audio, vocals and kept video are the rest.
 - The `state.json` in each job folder lets History reopen a job after a restart.
 
 ### History, Report a problem
@@ -554,9 +562,15 @@ Recorded 2026-07-15 from Aman's answers.
 - **`tools/analyze_report.py <zip>`** (developer tool, not shipped) validates and safely unpacks a report, and prints the settings, steps with timings, re-anchoring, script lines, AI changes, flags, missing captions, failed commands, edits and errors. With the audio included, it re-runs the job offline with the same settings and diffs the captions. CLAUDE.md and AGENTS.md say to run it first.
 
 ### Tests
-- Unit tests: 183 (3 Windows-only skipped). The new ones cover log.txt/job.json content (a real job on a video plus a real transcription, every step and command), app.log rotation and API logging, redaction, missing captions, script lines (recovered, flagged, not found, Add it back, repeats in order), re-anchoring, report zip contents per checkbox, and History filtering, Open after a restart (edits included), Delete and settings.
-- UI: `ui_v49.js` 68/68; `ui_v48.js` _UI48_; warmup _WARMUP_.
-- _REALRUNS_
+- Unit tests: 181 (3 Windows-only skipped). The new ones cover log.txt/job.json content (a real job on a video plus a real transcription, every step and command), app.log rotation and API logging, redaction, missing captions, script lines (recovered, flagged, not found, Add it back, repeats in order), re-anchoring, report zip contents per checkbox, and History filtering, Open after a restart (edits included), Delete and settings.
+- UI: `ui_v49.js` 68/68 in the Mac's WebKit window. `ui_v48.js`: _UI48_. Its old check "the unspoken script line is left out and listed" now expects 4.9's *Not found in the audio* row instead of 4.8's warning. Warmup: PASS (isolation 3.9 s, alignment 3.5 s, listening check 3.5 s).
+- Twice a UI run stalled with the test window behind another app: macOS pauses a hidden web view's animation frames, so the progress card's exit animation never ended. Nothing in the app was wrong; the job had finished. The suites were re-run with the window visible.
+- **Real runs** (`test-fixtures/realrun.py`, listening check on, final AI check with Claude claude-haiku-5-5; the times are whole jobs):
+  - Sample clip: 16 s, 5 captions, all OK, Verified.
+  - Kabhi Kabhi Aditi (lyrics, Hinglish): 219 s (listening check 111 s), 107 captions, 82 OK, 25 to check (12 of them in the outro, against 4.8's 13 there), 14 AI fixes (all "aditi" → "Aditi"). Script lines: 2 recovered, 3 flagged, 0 not found.
+  - Hinglish reel (2:18, script mode; line 3 re-spelled "nahin aayi", loud music added over line 10): 87 s, 124 captions, 118 OK, 1 fixed, 5 to check. Line 3 aligned normally. Line 10 is kept and flagged, timed late (24.1 s, said at 22.4 s), with a *Possible missing caption* at 22.6–24.1 s pointing at it. Neither is dropped.
+  - Updated Music for crt (5:39, 95 lines): 316 s, 336 captions, 315 OK, 21 to check. Re-anchored once (lines 68–71), 4 script lines recovered, 0 flagged, 0 not found; 4.8 left out 16 lines of this file.
+  - A report zip of each, with audio, ran through `tools/analyze_report.py`: all valid, no failed commands or errors. The offline re-runs match the reported captions (clip 5/5, reel 122/124, CRT 316/336 within 0.2 s; Aditi 63/107, a sung song after a fresh separation without the AI check).
 
 ## V4.8.1 — The video stays in view while the list follows playback (2026-11-12, Mac)
 

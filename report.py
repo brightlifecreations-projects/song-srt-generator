@@ -33,6 +33,7 @@ TEXT_FILES = ("cues.json", "edited-cues.json", "timeline.json", "lyrics.txt", "a
               "transcript-draft.txt", "transcript-model.txt", "transcript-second-opinion.txt",
               "transcript-autocorrected.txt", "original.srt", "edited.srt")
 AUDIO_GLOB = "input.*"
+AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".flac"}
 DEFAULT_INCLUDE = {"logs": True, "text": True, "app_log": True, "audio": False}
 
 
@@ -61,8 +62,14 @@ def contents(job_dir: Path | None, include: dict) -> list[tuple[str, Path | None
             out += [(f"job/{p.name}", p, "text") for p in sorted(job_dir.glob("*.srt"))
                     if p.name not in TEXT_FILES]
         if include.get("audio"):
-            out += [(f"job/{p.name}", p, "binary") for p in sorted(job_dir.glob(AUDIO_GLOB))]
-    return out
+            out += [(f"job/{p.name}", p, "binary") for p in sorted(job_dir.glob(AUDIO_GLOB))
+                    if p.suffix.lower() in AUDIO_SUFFIXES]
+    seen, unique = set(), []
+    for item in out:  # a source named "input.mp3" makes "input.srt": never twice in the zip
+        if item[0] not in seen:
+            seen.add(item[0])
+            unique.append(item)
+    return unique
 
 
 def build(*, category: str, description: str, at: float | None, job_dir: Path | None, include: dict,

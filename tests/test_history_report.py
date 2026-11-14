@@ -149,6 +149,14 @@ class Report(unittest.TestCase):
         self.assertIn("job/cues.json", names)
         self.assertNotIn("job/log.txt", names)
 
+    def test_a_source_named_input_is_not_listed_twice(self):
+        (self.job / "input.srt").write_text("1\r\n00:00:00,000 --> 00:00:01,000\r\nx\r\n", encoding="utf-8")
+        out = self.build(audio=True)
+        names = [f["name"] for f in out["files"]]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertIn("job/input.srt", names)
+        self.assertIn("job/input.wav", names)
+
     def test_no_keys_or_home_path_anywhere(self):
         out = self.build(audio=True)
         self.assertEqual(report.secrets_found(Path(out["path"]), [self.secret]), [])
