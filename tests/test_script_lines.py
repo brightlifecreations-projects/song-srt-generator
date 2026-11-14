@@ -154,6 +154,14 @@ class Resolve(unittest.TestCase):
         self.assertEqual(r["lines"][1]["status"], "flagged")
         self.assertEqual(len(r["words"]), len(words))
 
+    def test_stretched_line_is_low_and_never_an_anchor(self):
+        ws = words_for(["Week four the orange dress the one from the barbecue"], [(269.5, 272.0)], [0.6])
+        for k, w in enumerate(ws[5:], start=5):  # the rest of the line pushed 10–20 s later
+            w["start"], w["end"] = 281.4 + k, 281.9 + k
+        score, why = script_lines.confidence(ws)
+        self.assertTrue(why.startswith("stretched"), why)
+        self.assertLess(score, 0.3)
+
     def test_confidence(self):
         self.assertEqual(script_lines.confidence([])[1], script_lines.NO_PLACE)
         ws = words_for(["a b c d"], [(0, 2)], [0.6])

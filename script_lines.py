@@ -33,6 +33,8 @@ SEARCH_PAD = 1.0       # seconds of audio either side of a gap heard with it (co
 WINDOW = 20.0          # longest stretch heard in one Whisper call
 EDGE = 0.3             # seconds at each end of a gap that belong to the neighbours when looking for speech
 NO_PLACE = "no place"  # a line with no time of its own
+STRETCH_HOLE = 4.0     # a gap this long between two words of one script line means it was stretched…
+STRETCH_PER_WORD = 1.4  # …and so does more than this many seconds per word over a long line
 
 
 def line_words(words: list[dict]) -> dict[int, list[dict]]:
@@ -54,6 +56,11 @@ def confidence(ws: list[dict]) -> tuple[float, str]:
         return 0.0, f"squeezed into {span:.2f} s"
     if squeezed >= 0.34 and len(ws) > 2:
         return mean / 4, f"{round(squeezed * 100)}% of its words squeezed"
+    # Stretched: the aligner ran one line over the lines after it ("Week four…" over 23 s, with 10 s
+    # holes between its own words). Never an anchor, always checked.
+    hole = max((b["start"] - a["end"] for a, b in zip(ws, ws[1:])), default=0.0)
+    if (len(ws) >= 3 and hole >= STRETCH_HOLE) or (len(ws) >= 4 and span > STRETCH_PER_WORD * len(ws) and span > 8.0):
+        return mean / 4, f"stretched over {span:.1f} s"
     return mean, "" if mean else "no confidence"
 
 
@@ -186,7 +193,7 @@ def reanchor(ctx: dict, words: list[dict], lines: list[str], *, threshold: float
         while t < stop - 0.05:
             spans.append((t, min(stop, t + WINDOW)))
             t = spans[-1][1]
-        heard = sorted((w for got in ear.hear_many(spans) for w in got if t0 - 0.3 <= (w["start"] + w["end"]) / 2 <= t1 + 0.3),
+        heard = sorted((w for got in _hear_many(ear, spans) for w in got if t0 - 0.3 <= (w["start"] + w["end"]) / 2 <= t1 + 0.3),
                        key=lambda w: w["start"])
         tokens = listen_check.heard_tokens(heard, numbers_language) if heard else []
         caption = [(i, w) for i in idx for w in lines[i].split()]
@@ -245,6 +252,16 @@ def reanchor(ctx: dict, words: list[dict], lines: list[str], *, threshold: float
             log.info("Re-anchored line %d: %s -> %s%s", x["line"], _span(x["before"]), _span(x["after"]),
                      f" (heard at {_span(x['heard_at'])})" if x["heard_at"] else " (not heard: placed between anchors)")
     return words, rounds
+
+
+def _hear_many(ear, spans):
+    """ear.hear_many with repetition loops split and left out (Ear.split_loops), then back as it was."""
+    saved = getattr(ear, "split_loops", False)
+    ear.split_loops = True
+    try:
+        return ear.hear_many(spans)
+    finally:
+        ear.split_loops = saved
 
 
 def _span(s) -> str:
@@ -310,7 +327,7 @@ def resolve(ctx: dict, words: list[dict], lines: list[str], *, threshold: float,
             t = end
     heard_by = [[] for _ in plans]
     if ear is not None and spans:
-        for n, got in zip(owner, ear.hear_many(spans)):
+        for n, got in zip(owner, _hear_many(ear, spans)):
             heard_by[n] += got
     calls = getattr(ear, "calls", 0)
     for plan, heard in zip(plans, heard_by):

@@ -279,12 +279,18 @@ class Ear:
         self.audio = decode_audio(str(ctx["source_path"]), sampling_rate=SR)
         self.duration = len(self.audio) / SR
         self.calls = 0
+        # V4.9: the script-line check and re-anchoring hear short gaps, where a repetition loop would
+        # pass for (or hide) a line: they set this. The listening check keeps 4.8's hearing — on a
+        # sung chorus, splitting loops cost 4× the time and turned misheard words into "nothing heard".
+        self.split_loops = False
 
     def hear(self, t0: float, t1: float, _depth: int = 0) -> list[dict]:
         """What Whisper hears in t0–t1. A sung chorus can send Whisper into a repetition loop ("hansate
         hansate …" over 25 s, V4.9): such a clip is heard again in two halves (twice at most), and
         what's still a loop is left out — it's Whisper, not the audio."""
         out = self._hear(t0, t1)
+        if not self.split_loops:
+            return out
         if _looped(out) and _depth < 2 and t1 - t0 > 6.0:
             mid = (t0 + t1) / 2
             if self.ctx.get("log"):
