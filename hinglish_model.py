@@ -73,16 +73,25 @@ def download(progress=None) -> Path:
     with _download_lock:
         if installed():
             return MODEL_DIR
+        import joblog
         _set(state="downloading", done_mb=0.0, error=None)
+        joblog.app_log.info("Hinglish model download started: %s", config.HINGLISH_MODEL_URL)
+        t0 = time.monotonic()
         try:
             _fetch(progress)
         except DownloadError as e:
             _set(state="error", error=str(e))
+            joblog.model_event("download failed", "whisper-hinglish-apex-int8", url=config.HINGLISH_MODEL_URL,
+                               seconds=round(time.monotonic() - t0, 1), error=str(e))
             raise
         except Exception as e:
             _set(state="error", error=f"Couldn't install the Hinglish model ({e}).")
+            joblog.model_event("download failed", "whisper-hinglish-apex-int8", url=config.HINGLISH_MODEL_URL,
+                               seconds=round(time.monotonic() - t0, 1), error=repr(e))
             raise DownloadError(_state["error"])
         _set(state="installed")
+        joblog.model_event("download", "whisper-hinglish-apex-int8", url=config.HINGLISH_MODEL_URL,
+                           size_mb=_state.get("total_mb"), seconds=round(time.monotonic() - t0, 1), path=str(MODEL_DIR))
         return MODEL_DIR
 
 

@@ -3,6 +3,8 @@ import Workspace from "./Workspace.jsx";
 import Corrections from "./Corrections.jsx";
 import AiKeys from "./AiKeys.jsx";
 import Updates from "./Updates.jsx";
+import History from "./History.jsx";
+import ReportDialog from "./ReportDialog.jsx";
 
 /* The three sections. Presets come from /api/meta (config.SECTIONS); these are the fallback
    if the server's list hasn't arrived yet. */
@@ -20,6 +22,7 @@ const PAGES = {
   corrections: { title: "Corrections", line: "Whisper's mistakes and your fixes, learnt from every approval." },
   ai: { title: "AI & API keys", line: "Optional AI polish. Only transcript text is sent; audio and video stay on this computer." },
   updates: { title: "Updates", line: "Check for a new version, and choose how updates arrive." },
+  history: { title: "History", line: "Every job, newest first — open one to keep editing, run it again, or report a problem." },
 };
 
 const ICON = {
@@ -29,6 +32,8 @@ const ICON = {
   corrections: <><path d="M4 7h10M4 12h7M4 17h6" /><path d="m14 16 2.5 2.5L21 13" /></>,
   ai: <><circle cx="8" cy="15" r="4" /><path d="m11 12 9-9M17 6l3 3M15 8l2 2" /></>,
   updates: <><path d="M20 12a8 8 0 1 1-2.3-5.7" /><path d="M20 4v4h-4" /><path d="M12 8v5l3 2" /></>,
+  history: <><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /></>,
+  report: <><path d="M5 21V4h11l-1.5 4L16 12H5" /></>,
   sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></>,
   moon: <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z" />,
   collapse: <path d="M15 6l-6 6 6 6" />,
@@ -105,6 +110,10 @@ export default function App() {
   const collapsed = narrow || userCollapsed;
   const [ai, setAi] = useState(null); // /api/ai, for the sidebar's status
   const [upd, setUpd] = useState(null); // /api/updates, for the Updates dot
+  // History → a section: {section, jobId} (Open) or {section, rerun: settings, start} (Re-run), with n
+  // so the same request twice still arrives.
+  const [request, setRequest] = useState(null);
+  const [reporting, setReporting] = useState(null); // {job?, label?, time?} while the report form is open
 
   useEffect(() => {
     fetch("/api/ai").then(r => r.json()).then(setAi).catch(() => {});
@@ -135,6 +144,15 @@ export default function App() {
     setUserCollapsed(c => { store("srt-sidebar", c ? "open" : "collapsed"); return !c; });
   }
 
+  function openFromHistory(opened) {
+    setRequest(r => ({ section: opened.section, jobId: opened.job_id, n: (r?.n || 0) + 1 }));
+    setPage(opened.section);
+  }
+  function rerunFromHistory(settings, start) {
+    setRequest(r => ({ section: settings.section, rerun: settings, start, n: (r?.n || 0) + 1 }));
+    setPage(settings.section);
+  }
+
   const tabs = SECTION_TABS.map(t => ({ ...t, ...(meta?.sections || []).find(s => s.code === t.code) }));
   const aiOn = ai && ai.enabled && ai.usable;
   const updateDot = !!(upd && upd.available && upd.status !== "uptodate");
@@ -159,8 +177,13 @@ export default function App() {
           {nav("corrections", "Corrections")}
           {nav("ai", "AI & API keys")}
           {nav("updates", "Updates", updateDot)}
+          {nav("history", "History")}
         </nav>
         <div className="sidebar-foot">
+          <button className="navitem" onClick={() => setReporting({})} data-testid="report-general"
+            title={collapsed ? "Report a problem" : undefined}>
+            <Icon name="report" /><span className="navlabel">Report a problem</span>
+          </button>
           <button className="aistatus" onClick={() => setPage("ai")} data-testid="ai-status"
             title={collapsed ? `AI polish: ${aiOn ? "on" : "off"}` : undefined}>
             <span className={`dot${aiOn ? " on" : ""}`} />
@@ -186,12 +209,17 @@ export default function App() {
           <p>{PAGES[page].line}</p>
         </header>
         {tabs.map(t => (
-          <Workspace key={t.code} section={t.code} preset={t} meta={meta} active={page === t.code} />
+          <Workspace key={t.code} section={t.code} preset={t} meta={meta} active={page === t.code}
+            request={request?.section === t.code ? request : null} onReport={setReporting} />
         ))}
+        <History active={page === "history"} onOpen={openFromHistory} onRerun={rerunFromHistory}
+          onReport={setReporting} />
         <Corrections active={page === "corrections"} />
         <AiKeys active={page === "ai"} onChange={setAi} />
         <Updates active={page === "updates"} onChange={setUpd} />
       </main>
+      {reporting && <ReportDialog job={reporting.job} jobLabel={reporting.label} time={reporting.time}
+        onClose={() => setReporting(null)} />}
     </div>
   );
 }

@@ -95,6 +95,14 @@ MAX_UPLOAD_MB = 500
 # only its audio is kept (extracted with ffmpeg; the video itself isn't copied into jobs/).
 MAX_VIDEO_UPLOAD_MB = 4096
 
+# History page (V4.9): job folders older than this many days are deleted when the app starts.
+# 0 = never delete. The History page changes it (saved in app-settings.json in the data folder).
+JOB_KEEP_DAYS = 0
+
+# Backend logging (V4.9): "detailed" (every step at DEBUG: raw Whisper output, word timings, full AI
+# requests) or "normal". Changed on the History page; saved in app-settings.json.
+LOG_LEVEL = "detailed"
+
 # Forget finished jobs in the app after this many minutes (download links stop working).
 # Their files stay in jobs/ on disk either way.
 JOB_RETENTION_MINUTES = 120
@@ -131,9 +139,13 @@ TRANSCRIBE_PAUSE_SECONDS = 0.7
 MERGE_SHORT_DEFAULT = False
 MERGE_SHORT_SECONDS = 0.5
 
-# Script mode: a script line the aligner finds with mean word confidence below this (or squeezes
-# into almost no time) isn't in the audio. It's left out of the SRT and listed in a warning.
-UNMATCHED_LINE_PROBABILITY = 0.15
+# Script mode (V4.9, script_lines.py): a script line the aligner finds with mean word confidence below
+# this, or with its words squeezed into no time, is checked against the audio: placed in the gap
+# between its neighbours, re-heard by Whisper and kept ("recovered"), kept and flagged for a check,
+# or — only when the gap has no speech at all — listed as "Not found in the audio" (with Add it back).
+# Never silently dropped. How 0.15 was chosen: DECISIONS.md V4.9.
+SCRIPT_LINE_CONFIDENCE = 0.15
+UNMATCHED_LINE_PROBABILITY = SCRIPT_LINE_CONFIDENCE  # the 4.6–4.8 name, kept for old scripts
 
 # Final AI check (V4.6): longest wait for the provider before the rule-based captions are used.
 AI_REVIEW_TIMEOUT_SECONDS = 60

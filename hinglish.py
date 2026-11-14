@@ -43,6 +43,7 @@ _model = None
 def load_model():
     """The Apex model (int8), loaded once per process. Downloads it first if needed."""
     global _model
+    import joblog
     if _model is None:
         import stable_whisper
 
@@ -51,8 +52,13 @@ def load_model():
         if device == "auto":
             import torch
             device = "cuda" if torch.cuda.is_available() else "cpu"
+        joblog.model_event("cache miss", "whisper-hinglish-apex-int8", device=device, path=str(path))
+        t0 = time.perf_counter()
         _model = stable_whisper.load_faster_whisper(
             str(path), device=device, compute_type="int8" if device == "cpu" else "int8_float16")
+        joblog.model_event("load", "whisper-hinglish-apex-int8", seconds=round(time.perf_counter() - t0, 2))
+    else:
+        joblog.model_event("cache hit", "whisper-hinglish-apex-int8")
     return _model
 
 

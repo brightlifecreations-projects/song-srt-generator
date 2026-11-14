@@ -44,6 +44,9 @@ UV = str(SUPPORT / "bin" / "uv")
 sys.path.insert(0, str(APP_DIR))
 import config  # noqa: E402
 from pipeline import ACCEPTED_EXTENSIONS  # noqa: E402
+import joblog  # noqa: E402  (V4.9: setup steps and update checks go to app.log too)
+
+joblog.setup_app_log()
 
 VERSION = (APP_DIR / "VERSION").read_text(encoding="utf-8").strip()
 LOCAL_HOST = "127.0.0.1" if config.HOST in ("0.0.0.0", "") else config.HOST
@@ -144,6 +147,7 @@ def write_lock(lock):
 def log_line(message: str):
     with LOG.open("a", encoding="utf-8") as log:
         log.write(f"=== {time.ctime()}  {message}\n")
+    joblog.app_log.info("Launcher: %s", message)
 
 
 def trash_old_app():
@@ -310,7 +314,9 @@ class Shell:
                 if line and time.monotonic() - last > 0.1:
                     last = time.monotonic()
                     self.ui("logLine", line)
-            return self.proc.wait() == 0
+            code = self.proc.wait()
+            joblog.app_log.log(20 if code == 0 else 40, "Setup step %s: exit %d", " ".join(str(c) for c in cmd), code)
+            return code == 0
 
     def fail(self, message):
         self.ui("fail", message)

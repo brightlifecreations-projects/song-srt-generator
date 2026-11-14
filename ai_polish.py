@@ -108,25 +108,38 @@ def _keyring():
 
 
 def get_key(provider: str) -> str | None:
+    """The provider's key from the key store. Its value goes to the redaction list; the app log notes
+    only that it was read (or wasn't), never the value."""
+    import joblog
     try:
-        return _keyring().get_password(KEYCHAIN_SERVICE, provider)
-    except PolishError:
+        key = _keyring().get_password(KEYCHAIN_SERVICE, provider)
+    except Exception as e:  # noqa: BLE001
+        joblog.app_log.warning("Key store: reading the %s key failed (%s)", provider, type(e).__name__)
         return None
-    except Exception:
-        return None
+    joblog.add_secret(key)
+    joblog.app_log.debug("Key store: read the %s key (%s)", provider, "found" if key else "none saved")
+    return key
 
 
 def set_key(provider: str, key: str):
     """Store (or, with an empty key, delete) a provider's API key in the system key store."""
+    import joblog
     kr = _keyring()
     key = (key or "").strip()
+    joblog.add_secret(key)
     if key:
-        kr.set_password(KEYCHAIN_SERVICE, provider, key)
+        try:
+            kr.set_password(KEYCHAIN_SERVICE, provider, key)
+        except Exception as e:
+            joblog.app_log.warning("Key store: saving the %s key failed (%s)", provider, type(e).__name__)
+            raise
+        joblog.app_log.info("Key store: saved the %s key", provider)
     else:
         try:
             kr.delete_password(KEYCHAIN_SERVICE, provider)
-        except Exception:
-            pass
+            joblog.app_log.info("Key store: removed the %s key", provider)
+        except Exception as e:  # noqa: BLE001
+            joblog.app_log.info("Key store: no %s key to remove (%s)", provider, type(e).__name__)
     settings = load_settings()
     saved = set(settings["keys_saved"])
     settings["keys_saved"] = sorted(saved | {provider} if key else saved - {provider})
@@ -217,6 +230,7 @@ def _http_error(status: int, body: str) -> PolishError:
 class Adapter:
     def __init__(self, base_url: str, key: str | None, model: str, timeout: float):
         self.base_url, self.key, self.model, self.timeout = base_url.rstrip("/"), key, model, timeout
+        self.usage = None  # {"input_tokens", "output_tokens"} of the last request, when the provider says
 
     def complete(self, system: str, user: str, schema: dict | None = None) -> str:
         raise NotImplementedError
@@ -283,6 +297,10 @@ class AnthropicAdapter(Adapter):
             raise PolishError("offline", "Couldn't reach Anthropic — no internet connection?")
         except anthropic.APIStatusError as e:
             raise _http_error(e.status_code, str(e))
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            self.usage = {"input_tokens": getattr(usage, "input_tokens", None),
+                          "output_tokens": getattr(usage, "output_tokens", None)}
         if response.stop_reason == "refusal":
             raise PolishError("refusal", "The model declined to polish this transcript")
         return "".join(b.text for b in response.content if b.type == "text")
@@ -303,6 +321,9 @@ class OpenAIAdapter(Adapter):
                 raise
             payload.pop("response_format")  # a server without JSON mode: ask plainly
             data = self._post(f"{self.base_url}/chat/completions", payload, headers)
+        u = data.get("usage") or {}
+        if u:
+            self.usage = {"input_tokens": u.get("prompt_tokens"), "output_tokens": u.get("completion_tokens")}
         try:
             return data["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError, TypeError):
@@ -318,6 +339,9 @@ class GeminiAdapter(Adapter):
                    "generationConfig": {"responseMimeType": "application/json"}}
         data = self._post(f"{self.base_url}/models/{self.model}:generateContent", payload,
                           {"x-goog-api-key": self.key or ""})
+        u = data.get("usageMetadata") or {}
+        if u:
+            self.usage = {"input_tokens": u.get("promptTokenCount"), "output_tokens": u.get("candidatesTokenCount")}
         try:
             candidate = data["candidates"][0]
         except (KeyError, IndexError, TypeError):
@@ -589,7 +613,8 @@ def polish(lines: list[str], settings: dict, **context) -> dict:
     if not any(line.strip() for line in lines):
         raise PolishError("invalid", "There's no text to polish")
     adapter = adapter_for(settings)
-    text = adapter.complete(SYSTEM_PROMPT, build_request(lines, **context))
+    request = build_request(lines, **context)
+    text = adapter.complete(SYSTEM_PROMPT, request)
     polished = parse_lines(text, len(lines))
     kept, skipped = [], []
     for i, (a, b) in enumerate(zip(lines, polished)):
@@ -600,7 +625,8 @@ def polish(lines: list[str], settings: dict, **context) -> dict:
             skipped.append(i)
     return {"lines": kept, "marks": changes(lines, kept), "skipped_lines": skipped,
             "provider": settings["provider"], "model": settings["models"][settings["provider"]],
-            "seconds": round(time.perf_counter() - t0, 2)}
+            "seconds": round(time.perf_counter() - t0, 2), "request": request, "response": text,
+            "usage": adapter.usage}
 
 
 def test_connection(settings: dict) -> dict:

@@ -14,6 +14,7 @@ of popping a window. Every Sparkle call runs on the main thread.
 Feed URL, public EdDSA key and the daily check interval are in Info.plist.
 """
 
+import logging
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,9 @@ from Foundation import NSBundle, NSObject
 
 CHOICE_INSTALL, CHOICE_DISMISS = 1, 2  # SPUUserUpdateChoice
 _state = {}  # keeps the updater, driver and menu target alive for the app's lifetime
+
+
+_log = logging.getLogger("srt.app")  # the app log (joblog.setup_app_log adds its file)
 
 
 def _on_main(fn):
@@ -131,9 +135,11 @@ def _define_classes():
 
         def showUserInitiatedUpdateCheckWithCancellation_(self, cancel):
             self.s.status, self.s.error = "checking", None
+            _log.info("Sparkle: update check started")
 
         def showUpdateFoundWithAppcastItem_state_reply_(self, item, state, reply):
             self.s.available, self.s.status, self.s.reply = _item_info(item), "available", reply
+            _log.info("Sparkle: update found (%s)", self.s.available.get("version"))
             if self.s.install_requested:
                 self._install()
 
@@ -145,15 +151,18 @@ def _define_classes():
 
         def showUpdateNotFoundWithError_acknowledgement_(self, error, ack):
             self.s.status, self.s.available = "uptodate", None
+            _log.info("Sparkle: up to date")
             ack()
 
         def showUpdaterError_acknowledgement_(self, error, ack):
             self.s.status, self.s.error = "error", str(error.localizedDescription())
+            _log.warning("Sparkle: error: %s", self.s.error)
             self.s.install_requested = False
             ack()
 
         def showDownloadInitiatedWithCancellation_(self, cancel):
             self.s.status, self.s.progress = "downloading", (0, 0)
+            _log.info("Sparkle: downloading the update")
 
         def showDownloadDidReceiveExpectedContentLength_(self, length):
             self.s.progress = (0, int(length))

@@ -140,6 +140,26 @@ After the captions are built (and after the final AI check), Whisper listens to 
 
 It's its own step in the progress (*Listening check*). On an Apple Silicon Mac it took 3 s for a 17-second clip, about 1 minute for a 2-minute Hinglish reel and about 2 minutes for a 3½-minute song (DECISIONS.md V4.8). **Download SRT** always gives the fixed version. Switching Line by line / Word by word re-checks from what was already heard, without listening again. Nothing is sent anywhere. A translation (English translation script) isn't compared with the audio.
 
+## Script lines are never left out (4.9)
+
+In lyrics/script mode every line of your text is accounted for. When the aligner loses its place (lines piling up at the end of the file with no time, or a long run of lines it isn't sure of), the app re-anchors it: from the last line it placed well, Whisper transcribes the rest of the audio, the remaining lines are matched to that transcript in order, and they're aligned again chunk by chunk on just their own stretch of audio. Any line it still isn't sure of is placed in the gap between its neighbours and re-heard there:
+
+- **Heard there:** kept, timed in that gap.
+- **Speech there, but no clear match:** kept, and marked in orange in the Review panel: *Script line not confidently found — check it* (▶ Listen, Looks right).
+- **No speech at all in the gap:** listed as *Not found in the audio* with **Add it back**; it's in the SRT only if you add it back.
+
+Repeated lines and choruses are matched in order. Stretches of speech longer than about 1.5 s with no caption show as **Possible missing caption** (orange; click to jump there, add a caption, or mark that nothing's missing). The summary above Download counts all of these (DECISIONS.md V4.9).
+
+## History (4.9)
+
+**History** in the sidebar lists every job, newest first: date and time, file (with a thumbnail for videos), section, mode, language, duration, captions, status (Verified, N to check, Error) and whether you edited it. Search by file name or caption text; filter by section, status and date. **Open** brings a job back into its section's Review panel exactly as you left it (video or waveform, captions, edits, flags), to keep editing and download again. **Re-run** runs it again with the same settings (or opens it with everything filled in so you can change something first). Also **View log**, **Show in Finder/Explorer**, **Report a problem** and **Delete**. On the same page: delete jobs older than N days (default: never), the log level (Normal / Detailed), and **Clear logs**.
+
+## Report a problem (4.9)
+
+In the Review panel, in History, and at the bottom of the sidebar (for problems like the app not starting or updating). Pick what's wrong, describe it, optionally give the time in the video (filled in from the playhead), and choose what to include: the job log and job.json, the captions and text, the app log from the last 24 hours, and the audio (off unless you tick it — it's your recording). API keys are never included, and your home folder's name is replaced with "~". **Create report** writes `SRT-Generator-report-<date>-<id>.zip` to Downloads, shows exactly what's in it, and opens a pre-filled email for you to send (also **Copy report text** and **Show zip**). Nothing is ever sent automatically.
+
+Every job folder keeps a detailed `log.txt` (to the millisecond) and `job.json` (settings, input, every step with its timing, every command, AI requests and replies, the listening check per caption, your Review edits); the app keeps `logs/app.log` in its data folder. Developers: `python tools/analyze_report.py <zip>` reads a report (see CLAUDE.md).
+
 ## Final AI check (optional, online)
 
 When an AI provider is set up on the **AI & API keys** page, every SRT — every page, both caption modes, lyrics and transcribe — gets one last check before it's shown (*Final check with <provider>* in the progress steps). Switch it off on that page (**Final AI check before output**, on by default). The provider receives the caption texts with their word lists, your script (lyrics mode), the section, the language and script, the caption rules and the numbers-kept-in-words list — never audio or video. Since 4.8 it does a full editorial pass: misheard or misspelled words, capitals and proper nouns (words your script writes in CAPS for emphasis stay in caps), numbers as digits, the clean-caption symbol rules, and line breaks by meaning (4–5 words, about 30 characters vertical, phrases whole, no line ending on a weak word, one speaker per caption). Anything it isn't sure of is marked **[?]** in the Review panel.
@@ -172,7 +192,7 @@ The file is plain Markdown that you can also edit in any text editor — one tab
 
 The **Corrections** page (in the sidebar) shows them all in a searchable table: edit, switch off or delete any row, or add one by hand. Filter by **Source**, and **Switch off AI rows** turns off every fix that came from AI polish alone in one go. **Upload .md** (or drop files on the page) merges teammates' files into yours: bad rows are listed with their line numbers and the file isn't merged; when two files fix the same wrong word differently you pick one (the one seen more often is preselected). **Download corrections.md** saves the merged file to share. **Reset** clears it after saving a backup in `corrections-backups/` (merges back up the old file too).
 
-Every job is also saved in the `jobs/` folder (the input audio, or just the sound of a video, plus vocals, the draft, the approved text, SRT, cue data and log). In the Mac app that's `~/Library/Application Support/SRT Generator/jobs/` (in Finder: Go → Go to Folder…). Delete old job folders whenever you like.
+Every job is also saved in the `jobs/` folder (the input audio, or just the sound of a video, plus vocals, the draft, the approved text, SRT, cue data and log). In the Mac app that's `~/Library/Application Support/SRT Generator/jobs/` (in Finder: Go → Go to Folder…). Delete old job folders whenever you like, or from the **History** page.
 
 From the command line:
 
@@ -182,7 +202,7 @@ From the command line:
 
 ## Settings
 
-Open `config.py` in a text editor — each setting has a one-line comment. (In the Mac app, config.py sits inside the read-only app bundle; the defaults are what you get.) The useful ones: `LANGUAGE` and `TRANSCRIBE_LANGUAGE` (the language preselected in each mode), `SECTIONS` (each section's default format and isolation, and its cue rules), `MUSIC_DETECT_DB` (how loud the background must be for *Auto* isolation), `MAX_UPLOAD_MB` / `MAX_VIDEO_UPLOAD_MB`, `MODEL_SIZE` (`"small"` = faster, `"medium"` = more accurate), `STEM_FORMAT` (`"wav"` or `"mp3"`), `HINGLISH_ENGINE` (`"apex"`, or `"transliterate"` for the pre-4.2 chain), `QUALITY_DEFAULT` (`"accurate"` or `"fast"`), `LOW_CONFIDENCE` (below this word probability a Hinglish word is highlighted), `PORT`, and `HOST` (set to `"0.0.0.0"` to let teammates on your network use it from their browser). Captions (4.6): `MAX_WORDS_PER_CAPTION`, `MAX_CHARS_VERTICAL` / `MAX_CHARS_HORIZONTAL` (the defaults the UI starts from), `CAPTION_MODE_DEFAULT`, `CAPTION_END_TAIL` (how long a caption stays after its last word), `WORD_GAP_FILL_SECONDS`, `TRANSCRIBE_PAUSE_SECONDS`, `MERGE_SHORT_DEFAULT` / `MERGE_SHORT_SECONDS`, `UNMATCHED_LINE_PROBABILITY` and `AI_REVIEW_TIMEOUT_SECONDS`. `SEPARATOR_ENGINE` is `"auto"` (the GPU engine on Apple Silicon, the CPU engine on Windows).
+Open `config.py` in a text editor — each setting has a one-line comment. (In the Mac app, config.py sits inside the read-only app bundle; the defaults are what you get.) The useful ones: `LANGUAGE` and `TRANSCRIBE_LANGUAGE` (the language preselected in each mode), `SECTIONS` (each section's default format and isolation, and its cue rules), `MUSIC_DETECT_DB` (how loud the background must be for *Auto* isolation), `MAX_UPLOAD_MB` / `MAX_VIDEO_UPLOAD_MB`, `MODEL_SIZE` (`"small"` = faster, `"medium"` = more accurate), `STEM_FORMAT` (`"wav"` or `"mp3"`), `HINGLISH_ENGINE` (`"apex"`, or `"transliterate"` for the pre-4.2 chain), `QUALITY_DEFAULT` (`"accurate"` or `"fast"`), `LOW_CONFIDENCE` (below this word probability a Hinglish word is highlighted), `PORT`, and `HOST` (set to `"0.0.0.0"` to let teammates on your network use it from their browser). Captions (4.6): `MAX_WORDS_PER_CAPTION`, `MAX_CHARS_VERTICAL` / `MAX_CHARS_HORIZONTAL` (the defaults the UI starts from), `CAPTION_MODE_DEFAULT`, `CAPTION_END_TAIL` (how long a caption stays after its last word), `WORD_GAP_FILL_SECONDS`, `TRANSCRIBE_PAUSE_SECONDS`, `MERGE_SHORT_DEFAULT` / `MERGE_SHORT_SECONDS`, `SCRIPT_LINE_CONFIDENCE` (4.9: below this a script line is checked against the audio) and `AI_REVIEW_TIMEOUT_SECONDS`. `JOB_KEEP_DAYS` and `LOG_LEVEL` are the defaults for the History page's settings. `SEPARATOR_ENGINE` is `"auto"` (the GPU engine on Apple Silicon, the CPU engine on Windows).
 
 ## If something goes wrong
 
@@ -197,7 +217,8 @@ Open `config.py` in a text editor — each setting has a one-line comment. (In t
 | "This video has no sound track" / "This file is silent" | There's no audio to subtitle; check you exported the video with sound. |
 | Windows app: "Getting SRT Generator ready" fails, or setup shows an error | Click **Try again**. If it keeps failing, click **Show the log** and send Aman `install.log` (in `%LOCALAPPDATA%\SRT Generator`). |
 | Windows: install fails with a path or "file name too long" error | Move the folder somewhere short, like `C:\SRT-Generator`, and run `Install.bat` again. |
-| A script line is missing from the SRT | It wasn't found in the audio (the warning lists it). Check it's really said, and spelled the way it's said. |
+| A script line is missing from the SRT | It's listed under *Not found in the audio* in the Review panel: no speech was heard where it would be. Use **Add it back** if it's really said, or **Report a problem**. |
+| Something else looks wrong | **Report a problem** (Review panel, History or the sidebar) makes a zip with the logs for Aman. |
 | Mac app setup window shows an error | Click **Try again**. If it keeps failing, click **Show the log** and send Aman `install.log`. |
 | "Song SRT Generator (the old version) is still open" | Quit the old app (its window and Dock icon), then open SRT Generator again; it moves your data over. |
 | "Port 7860 is already in use" in the Mac app | The browser version (`start.command`) is still running. Close its Terminal window and click **Try again**. |

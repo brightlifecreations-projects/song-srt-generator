@@ -279,8 +279,29 @@ class Ear:
         self.audio = decode_audio(str(ctx["source_path"]), sampling_rate=SR)
         self.duration = len(self.audio) / SR
         self.calls = 0
+        # V4.9: the script-line check and re-anchoring hear short gaps, where a repetition loop would
+        # pass for (or hide) a line: they set this. The listening check keeps 4.8's hearing — on a
+        # sung chorus, splitting loops cost 4× the time and turned misheard words into "nothing heard".
+        self.split_loops = False
 
-    def hear(self, t0: float, t1: float) -> list[dict]:
+    def hear(self, t0: float, t1: float, _depth: int = 0) -> list[dict]:
+        """What Whisper hears in t0–t1. A sung chorus can send Whisper into a repetition loop ("hansate
+        hansate …" over 25 s, V4.9): such a clip is heard again in two halves (twice at most), and
+        what's still a loop is left out — it's Whisper, not the audio."""
+        out = self._hear(t0, t1)
+        if not self.split_loops:
+            return out
+        if _looped(out) and _depth < 2 and t1 - t0 > 6.0:
+            mid = (t0 + t1) / 2
+            if self.ctx.get("log"):
+                self.ctx["log"].debug("Whisper looped on %.2f–%.2f s; hearing it again in halves", t0, t1)
+            first = self.hear(t0, mid + 0.5, _depth + 1)
+            second = self.hear(mid - 0.5, t1, _depth + 1)
+            out = [w for w in first if (w["start"] + w["end"]) / 2 < mid] + \
+                  [w for w in second if (w["start"] + w["end"]) / 2 >= mid]
+        return _without_loops(out) if _depth == 0 else out
+
+    def _hear(self, t0: float, t1: float) -> list[dict]:
         import pipeline
 
         t0, t1 = max(0.0, t0), min(self.duration, t1)
@@ -370,6 +391,26 @@ class Ear:
         if len(ws) != len(text.split()):
             return None
         return [(round(t0 + float(w.start), 3), round(t0 + float(w.end), 3)) for w in ws]
+
+
+LOOP_RUN = 5       # the same word this many times in a row is a Whisper loop…
+LOOP_WORD = 24     # …and so is one "word" this long ("Indobastodaddaddadd…")
+
+
+def _looped(words: list[dict]) -> bool:
+    return len(words) != len(_without_loops(words))
+
+
+def _without_loops(words: list[dict]) -> list[dict]:
+    keep, k = [], 0
+    while k < len(words):
+        j, key = k, _key(words[k]["word"])
+        while j + 1 < len(words) and _key(words[j + 1]["word"]) == key:
+            j += 1
+        if j - k + 1 < LOOP_RUN:
+            keep += [w for w in words[k:j + 1] if len(_key(w["word"])) <= LOOP_WORD]
+        k = j + 1
+    return keep
 
 
 def hearing_for(ctx: dict, rules: dict) -> tuple[str, str | None] | None:
@@ -561,6 +602,11 @@ def _run(ctx, tokens, words, cues, rules, report, hearing, summary) -> dict:
                 reasons += [f"timing: {r}" for r in off]
         verdicts[tuple(cue["tokens"])] = {"fixes": fixes, "reasons": reasons,
                                           "heard": " ".join(h["text"] for h in near)[:200]}
+        log.debug("Listening check: caption %d %.3f–%.3f “%s” | heard ‘%s’ | words %s | heard at %s–%s%s%s",
+                  ci + 1, cue["start"], cue["end"], cue["text"], " ".join(h["text"] for h in near),
+                  " ".join(f"{j['word']}={j['state']}" for j in (confirm or judged)),
+                  f"{start:.3f}" if start is not None else "?", f"{end:.3f}" if end is not None else "?",
+                  f" | fixed: {'; '.join(fixes)}" if fixes else "", f" | to check: {'; '.join(reasons)}" if reasons else "")
         for line in fixes:
             log.info("Listening check: caption %d (“%s”) fixed — %s", ci + 1, cue["text"], line)
         for line in reasons:
