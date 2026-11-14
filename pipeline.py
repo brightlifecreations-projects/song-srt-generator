@@ -1490,12 +1490,33 @@ def align_and_write(ctx: dict, lyrics_text: str, strip_tags: bool = True,
             # silently dropped (script_lines.py).
             import listen_check
             import script_lines
+            hearing = listen_check.hearing_for(ctx, rules) if config.LISTEN_CHECK else None
+            ear = listen_check.Ear(ctx, *hearing) if hearing else None
+            rounds = []
+            if ear is not None and script_lines.lost_at(words, lyric_lines, config.SCRIPT_LINE_CONFIDENCE):
+                with _step(ctx, "re-anchoring") as step:
+                    words, rounds = script_lines.reanchor(
+                        ctx, words, lyric_lines, threshold=config.SCRIPT_LINE_CONFIDENCE, ear=ear,
+                        language=ctx.get("whisper_language_used"),
+                        numbers_language="hinglish" if hearing[0] != "medium" else caption_language,
+                        differ=listen_check.DIFFER if hearing[0] != "medium" else listen_check.AGREE, report=report)
+                    step["outputs"] = {"rounds": len(rounds), "lines": sum(len(r["lines"]) for r in rounds),
+                                       "anchored": sum(r["anchored"] for r in rounds)}
+                if record:
+                    record.set("reanchor", rounds)
+                _log_words(log, "Words after re-anchoring", words, lyric_lines)
             with _step(ctx, "script lines", threshold=config.SCRIPT_LINE_CONFIDENCE) as step:
-                hearing = listen_check.hearing_for(ctx, rules) if config.LISTEN_CHECK else None
                 checked = script_lines.resolve(ctx, words, lyric_lines, threshold=config.SCRIPT_LINE_CONFIDENCE,
                                                hearing=hearing, language=caption_language,
-                                               speech=speech_of(ctx), report=report)
+                                               speech=speech_of(ctx), report=report, ear=ear)
                 words = checked["words"]
+                # Lines re-anchoring put back where Whisper heard them count as recovered.
+                for x in (x for rnd in rounds for x in rnd["lines"] if x["heard_at"]):
+                    r = checked["lines"][x["line"] - 1]
+                    if r["status"] == "kept":
+                        r.update(status="recovered", reason=f"re-anchored: the aligner had lost its place; heard at "
+                                                            f"{x['heard_at'][0]:.2f}–{x['heard_at'][1]:.2f} s")
+                        checked["recovered"].append(x["line"] - 1)
                 step["outputs"] = {k: len(checked[k]) for k in ("recovered", "flagged", "not_found")}
             if record:
                 record.set("script_lines", checked["lines"])

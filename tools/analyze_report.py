@@ -109,6 +109,13 @@ def summarize(r: dict):
             out = json.dumps(s.get("outputs") or {}, ensure_ascii=False)
             print(f"{s.get('start', '')[11:23]}  {s['name']:<26} {s.get('seconds', 0):>8.3f} s  "
                   f"{'FAILED: ' + s['error'] if s.get('error') else out[:110]}")
+        for rnd in job.get("reanchor") or []:
+            section(f"Re-anchoring round {rnd['round']}: lost at line {rnd['lost_at']} ({rnd['why']})")
+            print(f"Anchor line {rnd['anchor']}, searched {rnd['searched']}, {rnd['anchored']} lines heard by Whisper, "
+                  f"{rnd['chunks']} chunks, {rnd['seconds']} s")
+            for x in rnd["lines"]:
+                print(f"Line {x['line']:>3}: {x['before']} -> {x['after']}"
+                      f"{'  heard at ' + str(x['heard_at']) if x['heard_at'] else '  (not heard)'}")
         lines = job.get("script_lines") or []
         odd = [x for x in lines if x.get("status") != "kept"]
         section(f"Script lines ({len(lines)}; {len(odd)} not simply kept)")

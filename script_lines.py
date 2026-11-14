@@ -111,6 +111,146 @@ def _realign(ear, t0: float, t1: float, lines: list[str], idx: list[int], templa
     return out
 
 
+# ---------------------------------------------------------------------------
+# Re-anchoring (V4.9): when the aligner loses its place, start again from the last line it placed well.
+
+ANCHOR = 0.3          # a line this confident (and not squeezed) is a trustworthy anchor
+LOST_RUN = 3          # this many low lines in a row means the aligner lost its place
+REANCHOR_ROUNDS = 4   # at most this many re-anchoring rounds per job
+CHUNK_LINES = 6       # an unheard stretch between two heard lines is re-aligned in chunks this long
+
+
+def lost_at(words: list[dict], lines: list[str], threshold: float, settled=frozenset()) -> tuple[int, str] | None:
+    """(first line, why) where the aligner lost its place, or None: lines piled up with no time (two
+    in a row squeezed), a line starting before the one before it ended, or LOST_RUN low lines in a row."""
+    by = line_words(words)
+    scores = [confidence(by.get(i, [])) for i in range(len(lines))]
+    # settled: lines re-anchoring already placed where Whisper heard them — never "lost" again.
+    squeezed = [i not in settled and s == 0.0 and (why.startswith("squeezed") or why == NO_PLACE)
+                for i, (s, why) in enumerate(scores)]
+    low = [i not in settled and (s < threshold or bool(why)) for i, (s, why) in enumerate(scores)]
+    prev_end = None
+    for i in range(len(lines)):
+        ws = by.get(i)
+        if ws and prev_end is not None and ws[0]["start"] < prev_end - 0.5:
+            return i, f"line {i + 1} starts {prev_end - ws[0]['start']:.1f} s before the line before it ends"
+        if ws:
+            prev_end = max(prev_end or 0.0, ws[-1]["end"])
+        if squeezed[i] and i + 1 < len(lines) and squeezed[i + 1]:
+            return i, f"lines {i + 1}–{i + 2} piled up with no time"
+        if all(low[i:i + LOST_RUN]) and i + LOST_RUN <= len(lines):
+            return i, f"{LOST_RUN}+ low-confidence lines in a row from line {i + 1}"
+    return None
+
+
+def _good(ws: list[dict]) -> bool:
+    score, why = confidence(ws)
+    return score >= ANCHOR and not why
+
+
+def reanchor(ctx: dict, words: list[dict], lines: list[str], *, threshold: float, ear, language: str | None,
+             numbers_language: str | None, differ: float, report=lambda key, msg: None) -> tuple[list[dict], list[dict]]:
+    """Re-anchor the alignment wherever it lost its place. Returns (words, rounds): each round
+    {"lost_at", "why", "anchor", "searched", "lines": [{"line", "before", "after", "heard"}]}.
+
+    Each round: the last confidently placed line before the trouble is the anchor; Whisper transcribes
+    only the audio from there (to the next well-placed line, or the end); the remaining lines are
+    matched to that transcript in order, and every line clearly heard becomes an anchor at the time it
+    was heard. The lines are then aligned again chunk by chunk, each chunk on just the audio between
+    its anchors. Repeats while it finds the aligner lost again (at most REANCHOR_ROUNDS)."""
+    log = ctx["log"]
+    duration = ctx.get("duration") or (max(w["end"] for w in words) if words else 0.0)
+    rounds, seen, settled = [], set(), set()
+    while ear is not None and len(rounds) < REANCHOR_ROUNDS:
+        lost = lost_at(words, lines, threshold, settled)
+        if lost is None:
+            break
+        k, why = lost
+        by = line_words(words)
+        j = next((i for i in range(k - 1, -1, -1) if _good(by.get(i, []))), -1)
+        t0 = by[j][-1]["end"] if j >= 0 else 0.0
+        # The trouble ends at the first pair of well-placed lines after it that start after the anchor.
+        m = next((i for i in range(k + 1, len(lines) - 1) if _good(by.get(i, [])) and _good(by.get(i + 1, []))
+                  and by[i][0]["start"] > t0 and by[i + 1][0]["start"] >= by[i][-1]["end"] - 0.5), len(lines))
+        t1 = by[m][0]["start"] if m < len(lines) else duration
+        idx = list(range(j + 1, m))
+        key = (j, m)
+        if key in seen or not idx or t1 - t0 < 0.3:
+            log.info("Re-anchoring: no further progress from line %d; the remaining lines are checked one by one", k + 1)
+            break
+        seen.add(key)
+        report("align", f"The aligner lost its place at line {k + 1} — re-anchoring from line {j + 2}…")
+        started = time.perf_counter()
+        # Whisper's transcript of just that stretch.
+        spans, t, stop = [], max(0.0, t0 - 0.3), min(duration, t1 + 0.3)
+        while t < stop - 0.05:
+            spans.append((t, min(stop, t + WINDOW)))
+            t = spans[-1][1]
+        heard = sorted((w for got in ear.hear_many(spans) for w in got if t0 - 0.3 <= (w["start"] + w["end"]) / 2 <= t1 + 0.3),
+                       key=lambda w: w["start"])
+        tokens = listen_check.heard_tokens(heard, numbers_language) if heard else []
+        caption = [(i, w) for i in idx for w in lines[i].split()]
+        matched = listen_check.match([listen_check._key(w) for _, w in caption], [x["key"] for x in tokens]) \
+            if tokens else [([], 0.0)] * len(caption)
+        anchors = {}  # line -> (start, end) where Whisper heard it
+        for i in idx:
+            pairs = [(mm, s) for (li, _), (mm, s) in zip(caption, matched) if li == i]
+            hits = sorted({x for mm, s in pairs if mm and s >= differ for x in mm})
+            if pairs and len([1 for mm, s in pairs if mm and s >= differ]) / len(pairs) >= HEARD_SHARE:
+                anchors[i] = (tokens[hits[0]]["start"], tokens[hits[-1]]["end"])
+        # Chunks: each heard line starts one; long unheard stretches are cut every CHUNK_LINES lines.
+        bounds, last = [], None
+        for n, i in enumerate(idx):
+            if n == 0 or i in anchors or (last is not None and i - last >= CHUNK_LINES):
+                bounds.append(n)
+                last = i
+        chunks = [idx[a:b] for a, b in zip(bounds, bounds[1:] + [len(idx)])]
+        new_by = {i: [dict(w) for w in ws] for i, ws in by.items()}
+        cursor = t0
+        for c, chunk in enumerate(chunks):
+            nxt = chunks[c + 1][0] if c + 1 < len(chunks) else None
+            c0 = max(cursor, anchors[chunk[0]][0] - 0.25) if chunk[0] in anchors else cursor
+            c1 = (anchors[nxt][0] - 0.05) if nxt in anchors else (t1 if nxt is None else None)
+            if c1 is None:  # an unheard next chunk: share the time up to the next heard line by length
+                later = next((x for x in chunks[c + 1:] if x[0] in anchors), None)
+                stop = anchors[later[0]][0] - 0.05 if later else t1
+                rest = [i for x in chunks[c:] if (later is None or x[0] < later[0]) for i in x]
+                share = sum(len(lines[i]) for i in chunk) / max(1, sum(len(lines[i]) for i in rest))
+                c1 = c0 + (stop - c0) * share
+            c1 = max(c1, c0 + 0.3)
+            got = _realign(ear, c0, c1, lines, chunk, new_by, language)
+            if got is None:
+                got = _spread(lines, chunk, c0, c1, new_by)
+            for i in chunk:
+                new_by[i] = got[i]
+            cursor = max(cursor, max((w["end"] for i in chunk for w in new_by[i]), default=c0))
+        words = [w for i in range(len(lines)) for w in new_by.get(i, [])]
+        _keep_order(words)
+        settled |= set(anchors)
+        after = line_words(words)
+        rec = {"round": len(rounds) + 1, "lost_at": k + 1, "why": why, "anchor": j + 1 if j >= 0 else None,
+               "searched": [round(t0, 3), round(t1, 3)], "anchored": len(anchors), "chunks": len(chunks),
+               "seconds": round(time.perf_counter() - started, 2), "lines": []}
+        for i in idx:
+            b0, a0 = by.get(i) or [], after.get(i) or []
+            rec["lines"].append({"line": i + 1, "before": [b0[0]["start"], b0[-1]["end"]] if b0 else None,
+                                 "after": [a0[0]["start"], a0[-1]["end"]] if a0 else None,
+                                 "heard_at": [round(x, 3) for x in anchors[i]] if i in anchors else None})
+        rounds.append(rec)
+        log.info("Re-anchoring round %d: the aligner lost its place at line %d (%s); anchor line %s ends %.2f s; "
+                 "re-aligned lines %d–%d on %.2f–%.2f s in %d chunks, %d lines anchored by Whisper's transcript, in %.1fs",
+                 rec["round"], k + 1, why, rec["anchor"], t0, idx[0] + 1, idx[-1] + 1, t0, t1, len(chunks),
+                 len(anchors), rec["seconds"])
+        for x in rec["lines"]:
+            log.info("Re-anchored line %d: %s -> %s%s", x["line"], _span(x["before"]), _span(x["after"]),
+                     f" (heard at {_span(x['heard_at'])})" if x["heard_at"] else " (not heard: placed between anchors)")
+    return words, rounds
+
+
+def _span(s) -> str:
+    return f"{s[0]:.2f}–{s[1]:.2f}" if s else "no time"
+
+
 def _speech(speech: list[tuple[float, float]], t0: float, t1: float) -> float:
     """Seconds of voice activity inside t0–t1."""
     return sum(max(0.0, min(b, t1) - max(a, t0)) for a, b in speech)

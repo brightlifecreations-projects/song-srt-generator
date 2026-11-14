@@ -162,6 +162,61 @@ class Resolve(unittest.TestCase):
         self.assertEqual(script_lines.confidence(ws)[0], 0.0)
 
 
+class Reanchor(unittest.TestCase):
+    """The aligner lost its place at line 3 and parked lines 3–8 at the end of the file (V4.9)."""
+
+    LINES = ["The morning train was late", "Nobody said a single word", "I counted every minute",
+             "Then the doors opened wide", "We stood there pressed together", "All the way home tonight",
+             "The city lights were fading", "And nobody said goodbye"]
+    TRUE = [(0.0, 2.0), (2.5, 4.5), (5.0, 7.0), (7.5, 9.5), (10.0, 12.0), (12.5, 14.5), (15.0, 17.0), (17.5, 19.5)]
+
+    def lost(self):
+        words = words_for(self.LINES, self.TRUE)
+        for li in range(2, 8):
+            squeezed(self.LINES, li, 19.9, words)
+        return words
+
+    def test_detects_where_it_got_lost(self):
+        self.assertEqual(script_lines.lost_at(self.lost(), self.LINES, 0.15)[0], 2)
+        self.assertIsNone(script_lines.lost_at(words_for(self.LINES, self.TRUE), self.LINES, 0.15))
+        low = words_for(self.LINES, self.TRUE, [0.9, 0.9, 0.1, 0.1, 0.1, 0.9, 0.9, 0.9])
+        self.assertEqual(script_lines.lost_at(low, self.LINES, 0.15)[0], 2)
+        order = words_for(self.LINES, [(0, 2), (2.5, 4.5), (1.0, 1.5)] + self.TRUE[3:])
+        self.assertIn("starts", script_lines.lost_at(order, self.LINES, 0.15)[1])
+
+    def reanchor(self, audio):
+        with mock.patch.object(script_lines, "_realign", return_value=None):
+            return script_lines.reanchor(ctx(), self.lost(), self.LINES, threshold=0.15, ear=FakeEar(audio),
+                                         language="en", numbers_language="en", differ=0.6)
+
+    def test_lines_go_back_to_where_they_are_said(self):
+        audio = [w for line, (a, b) in zip(self.LINES[2:], self.TRUE[2:]) for w in heard(line, a, b)]
+        words, rounds = self.reanchor(audio)
+        by = script_lines.line_words(words)
+        for li in range(2, 8):
+            self.assertLess(abs(by[li][0]["start"] - self.TRUE[li][0]), 0.4, (li, by[li][0]["start"]))
+        self.assertEqual(rounds[0]["lost_at"], 3)
+        self.assertEqual(rounds[0]["anchor"], 2)
+        self.assertEqual(rounds[0]["anchored"], 6)
+        self.assertEqual(rounds[0]["lines"][0]["before"], [19.9, 19.9])
+        self.assertEqual(len(rounds), 1)  # nothing left lost: one round was enough
+
+    def test_unheard_lines_are_placed_between_heard_ones_in_order(self):
+        keep = (2, 5, 7)  # Whisper heard only three of the six lines
+        audio = [w for li in keep for w in heard(self.LINES[li], *self.TRUE[li])]
+        words, rounds = self.reanchor(audio)
+        by = script_lines.line_words(words)
+        starts = [by[li][0]["start"] for li in range(8)]
+        self.assertEqual(starts, sorted(starts))
+        for li in keep:
+            self.assertLess(abs(by[li][0]["start"] - self.TRUE[li][0]), 0.4)
+        self.assertTrue(all(by[li][0]["start"] < by[li][-1]["end"] for li in range(8)))
+
+    def test_nothing_heard_does_not_loop(self):
+        words, rounds = self.reanchor([])
+        self.assertLessEqual(len(rounds), script_lines.REANCHOR_ROUNDS)
+
+
 class MarksAndAddBack(unittest.TestCase):
     def test_flagged_line_marks_its_caption(self):
         words = words_for(LINES, SPANS)
