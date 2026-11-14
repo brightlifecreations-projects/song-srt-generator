@@ -235,9 +235,11 @@ list = shown();
 log("Reels cues:", list.map(c => c[2]));
 log("Reels warnings:", warnings());
 check("Reels: speaker labels removed", !list.some(c => /Coach|Maya/.test(c[2])));
+// V4.9: an unspoken line is "Not found in the audio" in the Review panel (with Add it back), not a warning.
 check("Reels: the unspoken script line is left out and listed",
-  !list.some(c => /Berlin|Tokyo|Thursday/.test(c[2])) && !warnings().some(w => w.endsWith(".”.")) && warnings().some(w => w.includes("weren't found in the audio") && w.includes("Berlin")),
-  warnings().join(" / "));
+  !list.some(c => /Berlin|Tokyo|Thursday/.test(c[2])) && !warnings().some(w => w.endsWith(".”."))
+  && $$("[data-testid=notfound-row]", ws()).some(r => r.textContent.includes("Berlin")),
+  $$("[data-testid=notfound-row]", ws()).map(r => r.textContent).join(" / "));
 check("Reels: digits (12 years, 7 a.m., Week 1/week 1, 70%, size 4)",
   ["12 years", "7 a.m.", "1", "70%", "size 4"].every(s => list.some(c => c[2].includes(s))), list.map(c => c[2]).join(" | "));
 check("Reels: V4.8 numbers: '1 inch', '1st show', '7:30'", ["1 inch", "1st", "7:30"].every(s => list.some(c => c[2].includes(s))),

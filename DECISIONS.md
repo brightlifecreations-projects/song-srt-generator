@@ -498,6 +498,66 @@ Recorded 2026-07-15 from Aman's answers.
   - **Mac feed:** `…/releases/latest/download/appcast.xml` serves 4.6.1, byte-identical to v4.6.1's.
   - **Installed from the published Setup.exe** (same SHA-256 as the local build): the quick setup took 45 s, no downloads. The Updates page's **Check for updates** said "You're up to date (4.7)", mode `winsparkle`. The 72-check UI suite then passed 72/72 inside that installed app's own window.
 
+## V4.9 — Complete logging; History; Report a problem; script lines never dropped, alignment re-anchored (2026-11-14, Mac)
+
+### Script lines left out (the bug) and re-anchoring (the fix)
+- **Report:** lines that were in both the script and the audio got no caption: the app decided "the audio doesn't contain this line". Two causes, both found in real jobs:
+  1. **The aligner lost its place.** "Updated Music for crt" (5:39, 95 script lines, Song): from line 79 stable-ts stretched one line over 23 s (269.5–292.6 s, 6 of its 15 words zero-length), then parked lines 80–95 at the end of the file, mostly at 339.02 s with no length. 4.6–4.8's rule (mean confidence < 0.15 or words squeezed) then dropped all 16 as "not in the audio": ~47 s of speech with no captions.
+  2. **Real lines with low confidence.** Sung Hinglish scores low where it's sung: "Nahi toh bas," in the Kabhi Kabhi Aditi chorus is placed correctly at 171.4 s and 191.4 s but scores 0.12 and 0.09; 4.8 would drop it (and "Ye aditi jaane tu", "Hey aditi,", "thoda muskura…").
+- **Repro cases** (`test-fixtures/.work/v49`, synthetic with macOS voices + the real jobs). Failed before the fix: the CRT job (16 lines), Aditi (4 lines), a line buried under music 4× louder than the voice (confidence 0.047), a Hinglish script in chat spelling with one line under music (0.042). Did not fail: a line spoken very fast and 38 dB quieter (0.73), a stretched/vibrato/echo "sung" line under music (0.85), a 13-line chorus with every repeat written out (all ≥ 0.73), the Hinglish script with *nahin/nahi* and *kyunki/kyonki* spellings (≥ 0.49).
+- **Re-anchoring (`script_lines.reanchor`)**, before anything else is decided:
+  - *Lost* means: two lines in a row piled up with no time, a line starting more than 0.5 s before the previous one ends, or 3 low-confidence lines in a row (`lost_at`).
+  - The anchor is the last line before that with confidence ≥ 0.3 and nothing squeezed. Whisper transcribes only the audio from the anchor to the next pair of well-placed lines (or the end). The remaining lines are matched to that transcript in order (the listening check's matcher: spelling variants, numbers and symbols don't count), and each line with half its words heard becomes an anchor at the time Whisper heard it.
+  - The lines are aligned again chunk by chunk: each heard line starts a chunk, which runs to the next heard line (unheard stretches are cut every 6 lines), and each chunk is force-aligned on just its own stretch of audio. A chunk that can't be aligned is laid out over its stretch by length.
+  - Then it checks again, and repeats while the aligner is lost somewhere else (at most 4 rounds; a stretch it can't improve isn't retried, and lines Whisper placed are never "lost" again).
+  - **CRT, lines 80–95 before → after:** 292.56–309.88 → 273.84–275.66; 312.72–315.44 → 276.17–280.81; 316.02–323.30 → 281.15–284.39; 323.84–331.52 → 284.69–286.71; 331.52–335.22 → 287.13–291.81; 336.38–338.68 → 292.59–296.47; 338.68 (no length) → 296.89–299.35; 338.68–339.02 → 299.99–304.27; and lines 88–95, all at 339.02 with no length before → 304.87, 308.15, 311.31, 315.81, 320.25, 323.69, 329.17, 334.21 (each 2.5–5 s long). Line 79: 269.48–292.56 → 269.42–273.46. One round, 17 of 17 lines heard, 40 s.
+  - **Checked against an independent Whisper transcript of the whole file:** 15 of the 18 low lines start within 0.5 s of where Whisper hears them, and the other 3 are within 0.53–0.71 s, which is within the error of Whisper's own word timings.
+- **Then every line still below the threshold (`script_lines.resolve`):**
+  - The line is placed in the gap between its confident neighbours (aligned again there), and Whisper re-listens to the gap (the Hinglish model for Hinglish; all the gaps packed into shared calls).
+  - If half its words are heard, it's **recovered** and kept.
+  - If the gap has speech (voice activity or heard words, judged on its inner part: 0.3 s at each end belongs to the neighbours) but no clear match, it's **flagged**: "Script line not confidently found — check it".
+  - Only when the gap has no speech at all is it **not found**: left out of the SRT and listed in the Review panel with **Add it back** (in its gap, after the caption before it, or at the playhead).
+  - If voice detection or the re-listen can't run, the line is flagged, never declared not found.
+  - Whisper repetition loops (the same word 5+ times, or one 25-letter "word") are heard again in halves, and what's still a loop is ignored. The Hinglish model looped on Aditi's chorus ("hansate hansate…" for 25 s); this was the cause of 4.8's slipped-line flags on the outro.
+- **Results per case:**
+  - CRT: 18 low lines, 18 recovered (all by re-anchoring), 0 flagged, 0 not found.
+  - Aditi: 7 low lines, 5 recovered, 2 flagged ("Ye aditi jaane tu", "Hey aditi husde husde": voice there, Whisper wrote nothing clear), 0 not found. All three "Nahi toh bas," repeats are kept in order at 171.3, 191.3 and 211.8 s.
+  - Line under music: flagged, kept at its spoken position. The chat-spelled Hinglish line under music: flagged.
+  - The UI suite's drama script: a line that isn't spoken (in a silent gap) is not found; a line whose words don't match what's said is flagged.
+- **The Kabhi Kabhi Aditi outro (2:52–3:28):** re-heard with Whisper medium in 8-second windows, the chorus lines sit where they're sung (e.g. "Nahi toh bas" heard at 171.1, 181.1, 191.3, 201.4 s against captions at 171.4, 181.2, 191.4, 201.6 s), so the captions hadn't slipped. 4.8's flags came from the looping re-listen described above.
+- **Threshold `SCRIPT_LINE_CONFIDENCE = 0.15`** (4.8's value, now the line between "trust" and "check", no longer "drop").
+  - On Aditi (Hinglish, sung), 0.35 checked 26 lines in 146 s: 17 heard where placed, 9 inconclusive, 0 misplaced, 0 missing.
+  - 0.15 checked 7 lines in 60 s (5 heard, 2 inconclusive).
+  - Every misplaced or missing line in the tests was below 0.15 or squeezed, and squeezed or out-of-order lines are always checked whatever their score.
+  - Lines between 0.15 and 0.35 were all in the right place, and the listening check still re-hears every caption after this, so a higher value only cost time and added flags.
+- **Possible missing captions:** speech (Silero voice activity, bundled with faster-whisper, offline) longer than 1.5 s with no caption *word* on it. A word covers at most 1.2 s (3 s in Song, for held notes), because the aligner can stretch one word over a missing line: "I" was on screen 10.1–13.0 s while a whole left-out sentence was spoken. Shown in orange in the Review panel (click to jump, "+ Caption here", "Nothing missing"), counted in the summary, and listed in job.json.
+
+### Logging
+- `joblog.py`.
+  - **Per job:** `log.txt` (millisecond timestamps; DEBUG with Log level "Detailed", the default; INFO with "Normal") and `job.json`. job.json holds the environment, the settings, the input (ffprobe: size, duration, codecs, has video), and every step with start, end, duration, inputs and outputs. It also has every external command (exact command line, exit code, time, stdout/stderr trimmed to 4,000 characters), model loads/unloads/cache hits/downloads, script-line results, re-anchoring rounds, AI requests and responses with tokens and each change accepted or refused, missing captions, Review edits, warnings and errors with tracebacks. It is saved after every step, so a crash still leaves it.
+  - **App-wide:** `logs/app.log`, rotating at 10 MB, 5 files. It records start and stop, setup steps and warmup (also from the launchers), every `/api/` request (method, path, status, ms; job polling at DEBUG), queue events, Sparkle/WinSparkle/GitHub update checks, the Hinglish model download, settings changes, key-store access (success or failure only), and uncaught errors in any thread.
+- **Privacy.** Everything written passes through `redact()`: the home folder becomes `~`. Any key read from or saved to the key store is registered and replaced with "[key removed]", and so is anything shaped like a key (sk-…, AIza…, Bearer …, api_key=…). Report zips are redacted the same way. Tests scan every log, job.json and a report zip for a key-store value and the real home path.
+- **Size:** the Detailed log adds about 9 KB (log.txt) + 10 KB (job.json) to a 17-second job, and _REALRUN_SIZES_.
+- The `state.json` in each job folder lets History reopen a job after a restart.
+
+### History, Report a problem
+- **History** lists the job folders themselves (job.json, cues.json, edited-cues.json, state.json; jobs from before 4.9 too, from cues.json). It has search (file name and caption/script text) and filters for section, status (Verified / to check / Done / Error) and dates.
+- **Open** rebuilds the job in memory and switches to its section's Review panel, with the job's own video (`/api/jobs/{id}/video`) or audio waveform.
+  - Videos up to 1 GB are now kept in the job folder (`video.*`) for this. The app's upload copy is moved there, while a file given to the CLI or warmup is copied, never moved.
+  - A thumbnail (`thumb.jpg`) is made for videos.
+- **Re-run** sends the job's video or audio again (`from_job`) with its settings: "Re-run now", or "Change settings first", which fills the section page and waits for Generate.
+- **Delete** asks first. **View log** is searchable in the app, and **Show in Finder/Explorer** is there too.
+- **JOB_KEEP_DAYS** defaults to **0 (never delete)**. It is new in 4.9, and deleting old jobs by default would silently remove users' existing folders on update. It can be changed on the page (saved in app-settings.json) and is applied at app start.
+- **Report a problem** builds `SRT-Generator-report-<date>-<id>.zip` in Downloads, as the checkboxes say: the job log and job.json, captions/transcript/script, the app log from the last 24 h, and the audio (off by default). Never ai-settings.json or keys.
+  - It then opens a pre-filled `mailto:` email to ramanworks06@gmail.com through the system (the web view can't open mailto itself), with Copy report text and Show zip. The server only opens a mailto to that address, and only for a zip made in this run. Nothing is sent by the app.
+  - Test hooks: `SRT_REPORT_DIR` (zip folder) and `SRT_NO_OPEN` (log the open instead of opening).
+- **`tools/analyze_report.py <zip>`** (developer tool, not shipped) validates and safely unpacks a report, and prints the settings, steps with timings, re-anchoring, script lines, AI changes, flags, missing captions, failed commands, edits and errors. With the audio included, it re-runs the job offline with the same settings and diffs the captions. CLAUDE.md and AGENTS.md say to run it first.
+
+### Tests
+- Unit tests: 183 (3 Windows-only skipped). The new ones cover log.txt/job.json content (a real job on a video plus a real transcription, every step and command), app.log rotation and API logging, redaction, missing captions, script lines (recovered, flagged, not found, Add it back, repeats in order), re-anchoring, report zip contents per checkbox, and History filtering, Open after a restart (edits included), Delete and settings.
+- UI: `ui_v49.js` 68/68; `ui_v48.js` _UI48_; warmup _WARMUP_.
+- _REALRUNS_
+
 ## V4.8.1 — The video stays in view while the list follows playback (2026-11-12, Mac)
 
 - **Bug** (Aman's screen recording, a Reels transcribe job: 2-minute video, ~120 cues): while the video played, the Review panel scrolled the playing cue into view with `scrollIntoView`, which scrolls every scrollable ancestor. The right column (`.stagecol`, sticky with `overflow-y: auto` since V4.5) and the page moved too, so the video slid up out of view.
