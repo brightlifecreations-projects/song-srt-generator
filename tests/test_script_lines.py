@@ -272,6 +272,14 @@ class MissingCaptions(unittest.TestCase):
         cues = [{"start": 1.0, "end": 1.3}]
         self.assertEqual(script_lines.missing_captions([(0.0, 1.0), (1.3, 2.2)], cues), [])
 
+    def test_one_word_stretched_over_a_missing_line(self):
+        cues = [{"start": 4.0, "end": 8.4, "words": [{"start": 4.1, "end": 8.3}]},
+                {"start": 10.6, "end": 13.4, "words": [{"start": 10.6, "end": 13.4}]},
+                {"start": 13.4, "end": 16.9, "words": [{"start": 13.4, "end": 14.0}, {"start": 14.1, "end": 16.8}]}]
+        found = script_lines.missing_captions([(9.5, 19.9)], cues, word_cap=1.2)
+        self.assertTrue(any(m["start"] <= 12.0 and m["end"] >= 13.0 for m in found), found)
+        self.assertEqual(script_lines.missing_captions([(9.5, 13.4)], cues[1:2]), [])  # without the cap: covered
+
     def test_fully_covered(self):
         self.assertEqual(script_lines.missing_captions([(1.0, 5.0)], [{"start": 0.5, "end": 5.5}]), [])
 

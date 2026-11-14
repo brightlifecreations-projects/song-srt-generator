@@ -150,10 +150,12 @@ ws().querySelector(".playbtn")?.click(); await sleep(100);
 await snap("drama-script-lines");
 ws().querySelector("[data-testid=addback]").click(); await sleep(400);
 check("Drama: Add it back puts the line in the list (in its gap) and clears it from Not found",
-  shown().some(c => c[2] === "The blue umbrella is still in the car") && !ws().querySelector("[data-testid=notfound-row]"),
+  shown().some(c => /^The blue umbrella is still in the car\.?$/.test(c[2])) && !ws().querySelector("[data-testid=notfound-row]"),
   JSON.stringify(shown()));
-const added = shown().find(c => c[2] === "The blue umbrella is still in the car");
-check("Drama: added back between its neighbours", added && added[0] >= 1000 && added[0] <= 2600, JSON.stringify(added));
+const addedAt = shown().findIndex(c => /umbrella/.test(c[2]));
+const added = shown()[addedAt];
+check("Drama: added back between its neighbours, overlapping neither", added && added[0] >= 1000 && added[0] <= 2600
+  && shown()[addedAt - 1][1] <= added[0] && added[1] <= shown()[addedAt + 1][0], JSON.stringify(shown()));
 res = await compareDownload("Drama after Add it back");
 check("Drama: the added line is in the downloaded SRT", res && res.file.text.includes("The blue umbrella is still in the car"));
 // Looks right clears the script flag.
@@ -265,7 +267,7 @@ const all = logLines();
 setVal(document.querySelector("[data-testid=log-search]"), "Script line");
 await sleep(300);
 check("View log: the job log, searchable", all > 20 && logLines() > 0 && logLines() < all
-  && $$("[data-testid=log-text] > div").every(d => d.textContent.includes("Script line")), `${logLines()} of ${all}`);
+  && $$("[data-testid=log-text] > div").every(d => d.textContent.toLowerCase().includes("script line")), `${logLines()} of ${all}`);
 check("View log: no home folder path", !document.querySelector("[data-testid=log-text]").textContent.includes("/Users/"));
 key("Escape"); await sleep(200);
 hrow(dramaDir).querySelector("[data-testid=history-reveal]").click(); await sleep(200);

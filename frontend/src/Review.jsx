@@ -31,8 +31,11 @@ const savedFollow = () => { try { return localStorage.getItem(FOLLOW_KEY) !== "o
 const listenFlag = c => c.listen?.status === "flag" && !c.listen.resolved;
 const scriptFlag = c => c.script?.status === "flag" && !c.script.resolved;
 const flagged = c => listenFlag(c) || scriptFlag(c);
-/** A possible missing caption is covered once a cue overlaps half of it (the user added one). */
-const covered = (m, cues) => cues.some(c => Math.min(c.end, m.end) - Math.max(c.start, m.start) >= (m.end - m.start) / 2);
+/** A possible missing caption is covered once a caption the user added or changed overlaps half of it
+    (the generated ones were already judged on the server, word by word). */
+const cueKey = c => `${c.start}|${c.end}|${c.text}`;
+const covered = (m, cues, generated) => cues.some(c => !generated.has(cueKey(c))
+  && Math.min(c.end, m.end) - Math.max(c.start, m.start) >= (m.end - m.start) / 2);
 
 /** The AI's changes that are still in the text (the word at that position is the AI's word). */
 const liveAi = c => {
@@ -52,6 +55,7 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
   const [saveNote, setSaveNote] = useState("");  // autosave status
   const [notice, setNotice] = useState("");      // what an action did (re-time, …)
   const [retiming, setRetiming] = useState(false);
+  const [generatedKeys] = useState(() => new Set(initialCues.map(cueKey)));
   const dismissKey = `srt-missing-dismissed-${jobDir || jobId}`;
   const [dismissed, setDismissed] = useState(() => { try { return JSON.parse(localStorage.getItem(dismissKey)) || []; } catch { return []; } });
   const rowRefs = useRef([]);
@@ -158,6 +162,8 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
   function addBack(line, where) {
     const text = clean(line.text.replace(/^\s*[^\W\d_][\w.'’\- ]{0,24}?\s*:\s*/u, "")) || clean(line.text);
     let start = where === "playhead" ? time : (line.gap?.[0] ?? time);
+    const before = [...cues].reverse().find(c => c.start <= start);
+    if (before && before.end > start && where !== "playhead") start = before.end;  // never over the caption before
     const limit = where === "playhead" ? Infinity : (line.gap?.[1] ?? Infinity);
     const next = cues.find(c => c.start > start + 0.001);
     const words = text.split(" ").length;
@@ -396,10 +402,11 @@ export default function Review({ jobId, initialCues, edited: initiallyEdited, ca
   const fixedCount = cues.filter(c => c.listen?.status === "fixed").length;
   const unsureCount = cues.reduce((n, c) => n + (c.unsure || []).length, 0);
   const okCount = cues.filter(c => c.listen && !flagged(c) && c.listen.status !== "fixed").length;
-  const scriptToCheck = cues.filter(scriptFlag).length;
+  // Script lines (not captions) still to check: one line can be cut into several captions.
+  const scriptToCheck = new Set(cues.filter(scriptFlag).flatMap(c => c.script.lines?.length ? c.script.lines : [c.start])).size;
   const recovered = scriptSummary?.recovered || 0;
   const notAdded = notFound.filter(l => !cues.some(c => c.added === l.line));
-  const openMissing = missing.filter(m => !dismissed.includes(`${m.start}`) && !covered(m, cues));
+  const openMissing = missing.filter(m => !dismissed.includes(`${m.start}`) && !covered(m, cues, generatedKeys));
   const nothingLeft = !toCheck && !unsureCount && !openMissing.length;
   const nextToCheck = () => {
     const after = cues.findIndex((c, k) => k > sel && flagged(c));

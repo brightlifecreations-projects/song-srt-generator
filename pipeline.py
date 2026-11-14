@@ -1697,7 +1697,7 @@ def build_layout(ctx: dict, rules: dict, ai: dict | None, report=lambda key, msg
     if speech is not None:
         import script_lines
         with _step(ctx, "possible missing captions") as step:
-            missing = script_lines.missing_captions(speech, cues)
+            missing = script_lines.missing_captions(speech, cues, word_cap=3.0 if ctx["section"] == "song" else 1.2)
             step["outputs"] = {"found": len(missing)}
         tl["speech"] = speech
         for m in missing:

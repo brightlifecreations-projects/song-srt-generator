@@ -404,10 +404,25 @@ def speech_regions(audio_path, duration: float | None = None) -> list[tuple[floa
     return [(round(s["start"] / 16000, 3), round(s["end"] / 16000, 3)) for s in stamps]
 
 
-def missing_captions(speech: list[tuple[float, float]], cues: list[dict], min_gap: float = 1.5) -> list[dict]:
-    """Stretches longer than min_gap where the audio has speech but no caption is on screen:
-    [{"start", "end", "seconds"}]."""
-    covered = sorted((c["start"], c["end"]) for c in cues)
+def missing_captions(speech: list[tuple[float, float]], cues: list[dict], min_gap: float = 1.5,
+                     word_cap: float | None = None) -> list[dict]:
+    """Stretches longer than min_gap where the audio has speech but no caption covers it:
+    [{"start", "end", "seconds"}]. With word_cap, a caption covers only its words, each at most
+    word_cap seconds long: the aligner can stretch one word over a line missing from the script
+    ("I" on screen for 2.8 s while a whole sentence is spoken)."""
+    covered = []
+    for c in cues:
+        ws = c.get("words") if word_cap else None
+        if not ws:
+            covered.append((c["start"], c["end"]))
+            continue
+        for w in ws:
+            end = min(w["end"], w["start"] + word_cap)
+            if covered and w["start"] - covered[-1][1] < 0.35:  # words of one phrase: no gap between them
+                covered[-1] = (covered[-1][0], max(covered[-1][1], end))
+            else:
+                covered.append((w["start"], end))
+    covered.sort()
     out = []
     for a, b in speech:
         t = a
