@@ -563,7 +563,7 @@ Recorded 2026-07-15 from Aman's answers.
 
 ### Tests
 - Unit tests: 181 (3 Windows-only skipped). The new ones cover log.txt/job.json content (a real job on a video plus a real transcription, every step and command), app.log rotation and API logging, redaction, missing captions, script lines (recovered, flagged, not found, Add it back, repeats in order), re-anchoring, report zip contents per checkbox, and History filtering, Open after a restart (edits included), Delete and settings.
-- UI: `ui_v49.js` 68/68 in the Mac's WebKit window. `ui_v48.js`: _UI48_. Its old check "the unspoken script line is left out and listed" now expects 4.9's *Not found in the audio* row instead of 4.8's warning. Warmup: PASS (isolation 3.9 s, alignment 3.5 s, listening check 3.5 s).
+- UI: `ui_v49.js` 68/68 in the Mac's WebKit window. `ui_v48.js` 124/124 (every download equal to the Review list). Its old check "the unspoken script line is left out and listed" now expects 4.9's *Not found in the audio* row instead of 4.8's warning. Warmup: PASS (isolation 3.9 s, alignment 3.5 s, listening check 3.5 s).
 - Twice a UI run stalled with the test window behind another app: macOS pauses a hidden web view's animation frames, so the progress card's exit animation never ended. Nothing in the app was wrong; the job had finished. The suites were re-run with the window visible.
 - **Real runs** (`test-fixtures/realrun.py`, listening check on, final AI check with Claude claude-haiku-5-5; the times are whole jobs):
   - Sample clip: 16 s, 5 captions, all OK, Verified.
