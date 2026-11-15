@@ -498,7 +498,7 @@ Recorded 2026-07-15 from Aman's answers.
   - **Mac feed:** `…/releases/latest/download/appcast.xml` serves 4.6.1, byte-identical to v4.6.1's.
   - **Installed from the published Setup.exe** (same SHA-256 as the local build): the quick setup took 45 s, no downloads. The Updates page's **Check for updates** said "You're up to date (4.7)", mode `winsparkle`. The 72-check UI suite then passed 72/72 inside that installed app's own window.
 
-## V4.9 — Complete logging; History; Report a problem; script lines never dropped, alignment re-anchored (2026-11-14, Mac)
+## V4.9 — Complete logging; History; Report a problem; script lines never dropped, alignment re-anchored (2026-11-14, Mac; Windows 2026-11-15)
 
 ### Script lines left out (the bug) and re-anchoring (the fix)
 - **Report:** lines that were in both the script and the audio got no caption: the app decided "the audio doesn't contain this line". Two causes, both found in real jobs:
@@ -571,6 +571,31 @@ Recorded 2026-07-15 from Aman's answers.
   - Hinglish reel (2:18, script mode; line 3 re-spelled "nahin aayi", loud music added over line 10): 87 s, 124 captions, 118 OK, 1 fixed, 5 to check. Line 3 aligned normally. Line 10 is kept and flagged, timed late (24.1 s, said at 22.4 s), with a *Possible missing caption* at 22.6–24.1 s pointing at it. Neither is dropped.
   - Updated Music for crt (5:39, 95 lines): 316 s, 336 captions, 315 OK, 21 to check. Re-anchored once (lines 68–71), 4 script lines recovered, 0 flagged, 0 not found; 4.8 left out 16 lines of this file.
   - A report zip of each, with audio, ran through `tools/analyze_report.py`: all valid, no failed commands or errors. The offline re-runs match the reported captions (clip 5/5, reel 122/124, CRT 316/336 within 0.2 s; Aditi 63/107, a sung song after a fresh separation without the AI check).
+
+### Windows (2026-11-15)
+The Windows installer for 4.9 (Windows went from 4.7 to 4.9; there was no Windows 4.8). It was published to the existing v4.9 release, with `appcast-windows.xml` replacing the feed carried over from 4.7. The Mac `appcast.xml` is byte-identical to before.
+- **Two Windows bugs, fixed (`report.py`):**
+  - **Show in Explorer** (History, and Show zip) opened Documents instead of the job folder. `Popen(["explorer", "/select,<path>"])` quotes the whole argument when the path has a space, and on Windows jobs always live under `…\SRT Generator\jobs`. Explorer then ignores it. It's now `explorer /select,"<path>"` as one command line. Checked in the installed app through `Shell.Application`: before, a new Documents window with nothing selected; after, the jobs folder with the job selected.
+  - **The report zip** now goes to the Downloads *known folder* (`SHGetKnownFolderPath`), not `~\Downloads`. Downloads can be moved (Properties → Location, OneDrive), and then `~\Downloads` is a stale folder the user never opens. This PC's Desktop and Documents are on OneDrive.
+- **Windows-only differences:**
+  - The pre-filled email opens through `os.startfile("mailto:…")`, so it goes to whatever app handles mailto. With none set up, the dialog shows "Couldn't open it" and *Copy report text* is the way.
+  - Redacted paths read `~\AppData\…`.
+  - The labels say *Explorer*.
+  - Timings are CPU only (this laptop): warmup is isolation 27 s, alignment 8 s, listening check 12 s.
+- **Tests on Windows 11** (headless Edge with `ui_edge.py`; Edge 157):
+  - Unit tests: 184 pass, 6 skipped. The 5 model-backed logging tests also pass when pointed at models, including "no key or home path in any log or report".
+  - `ui_v49.js`: 68/68. `ui_v48.js`: 124/124.
+  - Warmup: PASS.
+  - A real Hinglish reel run (`realrun.py`, script mode, listening check on, no AI provider): a 54 s vertical video with two Indian-English voices over music and a Hindi file name. Whole job 157 s (separation 94 s, alignment 16 s, listening check 45 s with the Hinglish model). 28 captions: 22 OK, 1 timing fixed, 5 to check (each starting about 0.6 s after the voice following a pause). Script lines: 0 recovered, flagged or not found.
+- **Test fixes, no app change:**
+  - Some tests assumed macOS: SRT fixtures written in text mode (`\r\n` became `\r\r\n`), the locale encoding for the Node parity pipe and a log read, and `~/` in a redacted path.
+  - `ui_edge.py` passed a relative download folder, which Edge silently ignores, so every download "failed". It now uses an absolute path.
+  - New `test-fixtures/make_ui_media_windows.ps1` makes the suites' media with Windows' OneCore voices. It is saved with a BOM, because Windows PowerShell 5.1 reads a script without one as ANSI and garbles the Hindi file name.
+- **Installed:**
+  - The published Setup.exe (the same SHA-256 as the local build; its EdDSA signature checked against the published feed) installed over 4.7 from the v4.7 release. Setup ran its warmup and passed.
+  - In the app's own window: Updates says *You're up to date (4.9)* (WinSparkle). History lists the job, View log shows the steps with the home folder as `~`, Open restores the Review panel (Verified), and Show in Explorer selects the job. Report a problem (sidebar) makes the zip in Downloads with exactly report.json and app.log, and Show zip selects it.
+  - `logs\app.log` has the launcher, WinSparkle and warmup lines, and no home path.
+- Every app update re-runs warmup, and since 4.9 its job (`clip.wav`) shows in History; Delete removes it.
 
 ## V4.8.1 — The video stays in view while the list follows playback (2026-11-12, Mac)
 
