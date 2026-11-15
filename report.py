@@ -191,6 +191,13 @@ def safe_open(target: str):
     if sys.platform == "darwin":
         subprocess.Popen(["open", "-R", str(p)])
     elif os.name == "nt":
-        subprocess.Popen(["explorer", f"/select,{p}"])
+        subprocess.Popen(explorer_select_command(p))
     else:
         subprocess.Popen(["xdg-open", str(p.parent if p.is_file() else p)])
+
+
+def explorer_select_command(p: Path) -> str:
+    """Windows: the command line that opens Explorer with `p` selected. Only the path is quoted: given
+    as a list, Python quotes the whole "/select,C:\\...\\SRT Generator\\..." argument (the data folder's
+    name has a space), and Explorer then ignores it and opens Documents instead."""
+    return f'explorer /select,"{p}"'

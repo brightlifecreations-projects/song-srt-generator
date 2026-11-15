@@ -185,6 +185,20 @@ class Report(unittest.TestCase):
                                include={"logs": True, "text": True}, version="4.9", out_dir=self.tmp)
         self.assertEqual(self.names(out), {"report.json", "app.log"})
 
+    def test_explorer_select_quotes_only_the_path(self):
+        p = Path(r"C:\Users\x\AppData\Local\SRT Generator\jobs\20261112-100000-clip")
+        self.assertEqual(report.explorer_select_command(p),
+                         r'explorer /select,"C:\Users\x\AppData\Local\SRT Generator\jobs\20261112-100000-clip"')
+
+    @unittest.skipUnless(os.name == "nt", "Windows only")
+    def test_windows_show_in_explorer_uses_that_command(self):
+        folder = Path(self.tmp) / "SRT Generator" / "jobs" / "a job"
+        folder.mkdir(parents=True)
+        with mock.patch("subprocess.Popen") as popen, mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SRT_NO_OPEN", None)
+            report.safe_open(str(folder))
+        popen.assert_called_once_with(f'explorer /select,"{folder}"')
+
     @unittest.skipUnless(os.name == "nt", "Windows only")
     def test_windows_downloads_is_the_known_folder(self):
         """The zip goes where the user's Downloads folder really is, even when it has been moved."""
