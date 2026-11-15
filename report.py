@@ -37,9 +37,34 @@ AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".flac"}
 DEFAULT_INCLUDE = {"logs": True, "text": True, "app_log": True, "audio": False}
 
 
+FOLDERID_DOWNLOADS = "374DE290-123F-4565-9164-39C4925E467B"
+
+
+def _windows_downloads() -> Path | None:
+    """Windows: the Downloads folder where the user actually keeps it. It can be moved (Properties →
+    Location, or OneDrive), and then ~\\Downloads is a stale folder the user never looks in."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        guid = ctypes.create_string_buffer(uuid.UUID(FOLDERID_DOWNLOADS).bytes_le, 16)
+        out = ctypes.c_wchar_p()
+        if ctypes.windll.shell32.SHGetKnownFolderPath(guid, 0, None, ctypes.byref(out)) != 0:
+            return None
+        try:
+            return Path(out.value) if out.value else None
+        finally:
+            ctypes.windll.ole32.CoTaskMemFree(out)
+    except Exception:  # noqa: BLE001 — fall back to ~/Downloads
+        return None
+
+
 def downloads_dir() -> Path:
     if os.environ.get("SRT_REPORT_DIR"):  # tests: never the real Downloads folder
         return Path(os.environ["SRT_REPORT_DIR"])
+    win = _windows_downloads()
+    if win and win.is_dir():
+        return win
     d = Path.home() / "Downloads"
     return d if d.is_dir() else Path.home()
 

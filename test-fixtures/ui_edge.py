@@ -81,7 +81,8 @@ class Page:
 
 def main():
     base, files, steps = sys.argv[1], [f for f in sys.argv[2].split(",") if f], Path(sys.argv[3])
-    out = Path(sys.argv[4]) if len(sys.argv) > 4 else Path(tempfile.mkdtemp(prefix="ui-edge-"))
+    # Absolute: Edge silently ignores a relative downloadPath (every download then goes nowhere).
+    out = (Path(sys.argv[4]) if len(sys.argv) > 4 else Path(tempfile.mkdtemp(prefix="ui-edge-"))).resolve()
     out.mkdir(parents=True, exist_ok=True)
     downloads = out / "downloads"
     shutil.rmtree(downloads, ignore_errors=True)

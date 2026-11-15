@@ -37,10 +37,11 @@ def make_job(jobs: Path, name: str, *, file="clip.wav", section="song", status="
         (d / "cues.json").write_text(json.dumps({"source_file": file, "section": section, "cues": cues,
                                                  "listen_check": {"checked": len(cues)}, "caption_mode": "line",
                                                  "max_chars_per_line": 30, "duration_seconds": 17.2}), encoding="utf-8")
-        (d / "original.srt").write_text("1\r\n00:00:00,000 --> 00:00:01,000\r\nx\r\n", encoding="utf-8")
+        # Bytes, not write_text: on Windows, text mode would turn each \r\n into \r\r\n.
+        (d / "original.srt").write_bytes(b"1\r\n00:00:00,000 --> 00:00:01,000\r\nx\r\n")
     if edited is not None:
         (d / "edited-cues.json").write_text(json.dumps(edited), encoding="utf-8")
-        (d / "edited.srt").write_text("1\r\n00:00:00,000 --> 00:00:01,000\r\nedited\r\n", encoding="utf-8")
+        (d / "edited.srt").write_bytes(b"1\r\n00:00:00,000 --> 00:00:01,000\r\nedited\r\n")
     if audio:
         (d / "input.wav").write_bytes(b"RIFF....WAVEfmt fake audio")
     (d / "lyrics.txt").write_text(text, encoding="utf-8")
@@ -184,6 +185,23 @@ class Report(unittest.TestCase):
                                include={"logs": True, "text": True}, version="4.9", out_dir=self.tmp)
         self.assertEqual(self.names(out), {"report.json", "app.log"})
 
+    @unittest.skipUnless(os.name == "nt", "Windows only")
+    def test_windows_downloads_is_the_known_folder(self):
+        """The zip goes where the user's Downloads folder really is, even when it has been moved."""
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as k:
+            where = os.path.expandvars(winreg.QueryValueEx(k, "{" + report.FOLDERID_DOWNLOADS + "}")[0])
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SRT_REPORT_DIR", None)
+            self.assertEqual(os.path.normcase(str(report.downloads_dir())), os.path.normcase(where))
+        moved = Path(self.tmp) / "Moved Downloads"
+        moved.mkdir()
+        with mock.patch.object(report, "_windows_downloads", return_value=moved), \
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SRT_REPORT_DIR", None)
+            self.assertEqual(report.downloads_dir(), moved)
+
 
 class HistoryApi(unittest.TestCase):
     """Open a job again after the app restarted (nothing in memory), edits included; delete; settings."""
@@ -232,7 +250,7 @@ class HistoryApi(unittest.TestCase):
         # Editing again works on the restored job, and is logged.
         r = self.client.put(f"/api/jobs/{job_id}/cues", json={"cues": [{"start": 0.0, "end": 1.6, "text": "fixed again"}]})
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertIn("Review edit: text and timing", (self.jobs / "20261112-100000-clip" / "log.txt").read_text())
+        self.assertIn("Review edit: text and timing", (self.jobs / "20261112-100000-clip" / "log.txt").read_text(encoding="utf-8"))
 
     def test_open_refuses_a_job_without_captions(self):
         make_job(self.jobs, "20261113-100000-bad", cues=None)

@@ -25,7 +25,7 @@ class Parity(unittest.TestCase):
         script = ("import(process.argv[1]).then(m => { const xs = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
                   " process.stdout.write(JSON.stringify(xs.map(m.cleanCaption))); })")
         out = subprocess.run(["node", "-e", script, (ROOT / "frontend/src/reviewFix.js").as_uri()],
-                             input=json.dumps(samples), capture_output=True, text=True, check=True)
+                             input=json.dumps(samples), capture_output=True, text=True, encoding="utf-8", check=True)
         js = json.loads(out.stdout)
         for text, theirs in zip(samples, js):
             self.assertEqual(captions.clean_caption(text), theirs, repr(text))
