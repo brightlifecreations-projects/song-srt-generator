@@ -166,7 +166,8 @@ class JobLogging(unittest.TestCase):
             self.assertNotIn(SECRET[8:20], data, p)
             if p.name in ("log.txt", "job.json"):
                 self.assertNotIn(joblog.HOME, data, p)
-        self.assertIn("~/", self.text())  # the app folder's tools, shown with ~
+        # Paths under the home folder are shown with ~ ("~\AppData\..." on Windows).
+        self.assertIn("~" + os.sep, self.text())
         with zipfile.ZipFile(out["path"]) as z:
             self.assertIn("job/input.wav", z.namelist())
 
